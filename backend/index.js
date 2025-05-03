@@ -1,0 +1,238 @@
+// index.js
+const express = require('express');
+const dotenv = require('dotenv').config();
+const cors = require('cors');
+const mongoose = require('mongoose');
+const app = express();
+const PORT = process.env.PORT || 3000;
+const cookieParser = require('cookie-parser');
+const axios = require('axios');
+const authRoutes = require('./routes/authRoutes');
+const { App, ExpressReceiver } = require('@slack/bolt');
+
+// Initialize ExpressReceiver for Slack Bolt
+const receiver = new ExpressReceiver({
+  signingSecret: process.env.SLACK_SIGNING_SECRET,
+  endpoints: '/slack/events' // This defines the endpoint for Slack events
+});
+
+// Initialize Slack Bolt app with the receiver
+const slackApp = new App({
+  token: process.env.SLACK_BOT_TOKEN,
+  receiver // Use the ExpressReceiver instance
+});
+
+// Database connection
+mongoose.connect(process.env.MONGO_URL)
+  .then(() => console.log("db connected"))
+  .catch((err) => console.log("not connected", err));
+
+// Middleware setup
+app.use(express.json());
+app.use(cookieParser());
+app.use(express.urlencoded({ extended: false }));
+
+// CORS setup
+const corsOptions = {
+  origin: ['http://localhost:5173', 'https://slacktime-frontend.vercel.app'],
+  credentials: true,
+  optionsSuccessStatus: 200
+};
+app.use(cors(corsOptions));
+
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  next();
+});
+
+// Routes setup
+app.use('/', authRoutes);
+
+// Use the ExpressReceiver's router for Slack events
+app.use('/slack/events', receiver.router);
+
+// Slack OAuth callback
+app.get('/slack/oauth/callback', async (req, res) => {
+  try {
+    const response = await axios.post('https://slack.com/api/oauth.v2.access', {
+      client_id: process.env.SLACK_CLIENT_ID,
+      client_secret: process.env.SLACK_CLIENT_SECRET,
+      code: req.query.code,
+      redirect_uri: 'http://localhost:3000/slack/oauth/callback'
+    });
+    const { access_token, authed_user } = response.data;
+    await mongoose.model('User').updateOne(
+      { slackId: authed_user.id },
+      { slackAccessToken: access_token, slackId: authed_user.id, name: authed_user.id },
+      { upsert: true }
+    );
+    res.redirect('http://localhost:5173/dashboard');
+  } catch (error) {
+    console.error('OAuth error:', error);
+    res.status(500).send('Authentication failed');
+  }
+});
+
+// App Home tab
+slackApp.event('app_home_opened', async ({ event, client }) => {
+  try {
+    const user = await mongoose.model('User').findOne({ slackId: event.user });
+    const communities = await mongoose.model('Community').find({
+      members: { $elemMatch: { slackId: event.user } }
+    });
+
+    const blocks = [
+      {
+        type: 'header',
+        text: { type: 'plain_text', text: 'Timezone Tool' }
+      },
+      {
+        type: 'section',
+        text: { type: 'mrkdwn', text: user?.city ? `Your city: ${user.city}` : 'No city set.' }
+      },
+      {
+        type: 'actions',
+        elements: [
+          {
+            type: 'button',
+            text: { type: 'plain_text', text: 'Set City' },
+            action_id: 'set_city'
+          }
+        ]
+      }
+    ];
+
+    if (communities.length) {
+      for (const community of communities) {
+        blocks.push(
+          {
+            type: 'divider'
+          },
+          {
+            type: 'header',
+            text: { type: 'plain_text', text: `#${community.channel_name || community.channel_id}` }
+          }
+        );
+        for (const member of community.members) {
+          let timeText = `${member.city || 'No city set'}`;
+          if (member.city) {
+            try {
+              const timeResponse = await axios.get(`http://localhost:3000/api/worldtime?city=${member.city}`);
+              const { datetime, timezone } = timeResponse.data;
+              timeText = `${datetime} (${timezone})`;
+            } catch (error) {
+              timeText = 'Time unavailable';
+            }
+          }
+          blocks.push({
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `*${member.name || member.slackId}*: ${timeText}`
+            }
+          });
+        }
+      }
+    } else {
+      blocks.push({
+        type: 'section',
+        text: { type: 'mrkdwn', text: 'Join a channel and set your city to see timezones!' }
+      });
+    }
+
+    await client.views.publish({
+      user_id: event.user,
+      view: {
+        type: 'home',
+        blocks
+      }
+    });
+  } catch (error) {
+    console.error('App Home error:', error);
+  }
+});
+
+// Handle set city button
+slackApp.action('set_city', async ({ body, ack, client }) => {
+  await ack();
+  await client.views.open({
+    trigger_id: body.trigger_id,
+    view: {
+      type: 'modal',
+      callback_id: 'set_city_modal',
+      title: { type: 'plain_text', text: 'Set Your City' },
+      submit: { type: 'plain_text', text: 'Save' },
+      close: { type: 'plain_text', text: 'Cancel' },
+      blocks: [
+        {
+          type: 'input',
+          block_id: 'city',
+          element: { type: 'plain_text_input', action_id: 'user_city' },
+          label: { type: 'plain_text', text: 'City (e.g., London)' }
+        }
+      ],
+      private_metadata: body.channel_id || ''
+    }
+  });
+});
+
+// Handle city modal submission
+slackApp.view('set_city_modal', async ({ view, ack, client }) => {
+  await ack();
+  const city = view.state.values.city.user_city.value;
+  const user_id = view.submitter;
+  const channel_id = view.private_metadata;
+  try {
+    const user = await axios.post('http://localhost:3000/slack/addcity', {
+      user_id,
+      city,
+      channel_id
+    });
+
+    if (channel_id) {
+      await mongoose.model('Community').updateOne(
+        { channel_id },
+        {
+          $addToSet: {
+            members: { slackId: user_id, name: user.data.name || user_id, city }
+          }
+        },
+        { upsert: true }
+      );
+    }
+
+    await client.chat.postMessage({
+      channel: user_id,
+      text: `City set to ${city}! Check the App Home tab to see timezones.`
+    });
+  } catch (error) {
+    await client.chat.postMessage({
+      channel: user_id,
+      text: 'Error setting city: ' + (error.response?.data?.error || error.message)
+    });
+  }
+});
+
+// World time API route
+app.options('/api/worldtime', cors(corsOptions));
+app.get('/api/worldtime', async (req, res) => {
+  try {
+    const response = await axios.get(`https://api.api-ninjas.com/v1/worldtime?city=${req.query.city}`, {
+      headers: { 'X-Api-Key': process.env.API_NINJAS_KEY }
+    });
+    res.json(response.data);
+  } catch (error) {
+    console.error('Error fetching world time:', error);
+    res.status(500).json({ error: 'An error occurred while fetching world time' });
+  }
+});
+
+// Start Express server
+app.listen(PORT, () => {
+  console.log(`server is listening to port ${PORT}`);
+});
+
+module.exports = { app, slackApp };
