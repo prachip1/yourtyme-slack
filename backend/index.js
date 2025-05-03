@@ -34,7 +34,7 @@ app.use(express.urlencoded({ extended: false }));
 
 // CORS setup
 const corsOptions = {
-  origin: ['http://localhost:5173', 'https://slacktime-frontend.vercel.app'],
+  origin: ['http://localhost:5173', 'https://yourtyme-slack.vercel.app'],
   credentials: true,
   optionsSuccessStatus: 200
 };
@@ -61,7 +61,7 @@ app.get('/slack/oauth/callback', async (req, res) => {
       client_id: process.env.SLACK_CLIENT_ID,
       client_secret: process.env.SLACK_CLIENT_SECRET,
       code: req.query.code,
-      redirect_uri: 'http://localhost:3000/slack/oauth/callback'
+      redirect_uri: 'https://yourtyme-slack-backend.vercel.app/slack/oauth/callback'
     });
     const { access_token, authed_user } = response.data;
     await mongoose.model('User').updateOne(
@@ -69,7 +69,7 @@ app.get('/slack/oauth/callback', async (req, res) => {
       { slackAccessToken: access_token, slackId: authed_user.id, name: authed_user.id },
       { upsert: true }
     );
-    res.redirect('http://localhost:5173/dashboard');
+    res.redirect('https://yourtyme-slack.vercel.app/dashboard');
   } catch (error) {
     console.error('OAuth error:', error);
     res.status(500).send('Authentication failed');
@@ -120,7 +120,7 @@ slackApp.event('app_home_opened', async ({ event, client }) => {
           let timeText = `${member.city || 'No city set'}`;
           if (member.city) {
             try {
-              const timeResponse = await axios.get(`http://localhost:3000/api/worldtime?city=${member.city}`);
+              const timeResponse = await axios.get(`https://yourtyme-slack-backend.vercel.app/api/worldtime?city=${member.city}`);
               const { datetime, timezone } = timeResponse.data;
               timeText = `${datetime} (${timezone})`;
             } catch (error) {
@@ -186,7 +186,7 @@ slackApp.view('set_city_modal', async ({ view, ack, client }) => {
   const user_id = view.submitter;
   const channel_id = view.private_metadata;
   try {
-    const user = await axios.post('http://localhost:3000/slack/addcity', {
+    const user = await axios.post('https://yourtyme-slack-backend.vercel.app/slack/addcity', {
       user_id,
       city,
       channel_id
