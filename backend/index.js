@@ -236,3 +236,4 @@ app.listen(PORT, () => {
 });
 
 module.exports = app;
+module.exports.slackApp = slackApp; // Optional: export slackApp separately if needed
