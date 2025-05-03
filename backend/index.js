@@ -235,4 +235,4 @@ app.listen(PORT, () => {
   console.log(`server is listening to port ${PORT}`);
 });
 
-module.exports = { app, slackApp };
+module.exports = app;
