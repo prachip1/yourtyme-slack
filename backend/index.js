@@ -55,6 +55,7 @@ app.use('/', authRoutes);
 app.use('/slack/events', receiver.router);
 
 // Slack OAuth callback
+// backend/index.js
 app.get('/slack/oauth/callback', async (req, res) => {
   try {
     const response = await axios.post('https://slack.com/api/oauth.v2.access', {
@@ -63,16 +64,25 @@ app.get('/slack/oauth/callback', async (req, res) => {
       code: req.query.code,
       redirect_uri: 'https://yourtyme-slack-backend.vercel.app/slack/oauth/callback'
     });
-    const { access_token, authed_user } = response.data;
+    if (!response.data.ok) {
+      throw new Error(`Slack API error: ${response.data.error}`);
+    }
+    const { access_token, authed_user, team } = response.data;
+    if (!authed_user || !authed_user.id) {
+      throw new Error('authed_user is missing or invalid in Slack API response');
+    }
     await mongoose.model('User').updateOne(
       { slackId: authed_user.id },
-      { slackAccessToken: access_token, slackId: authed_user.id, name: authed_user.id },
+      { slackAccessToken: access_token, slackId: authed_user.id, name: authed_user.id, teamId: team.id },
       { upsert: true }
     );
     res.redirect('https://yourtyme-slack.vercel.app/dashboard');
   } catch (error) {
-    console.error('OAuth error:', error);
-    res.status(500).send('Authentication failed');
+    console.error('OAuth error:', error.message);
+    if (error.response) {
+      console.error('Slack API response:', error.response.data);
+    }
+    res.status(500).send(`Authentication failed: ${error.message}`);
   }
 });
 
