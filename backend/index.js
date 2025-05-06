@@ -28,6 +28,10 @@ mongoose.connect(process.env.MONGO_URL)
   .catch((err) => console.log("not connected", err));
 
 // Middleware setup
+// Apply raw body parsing specifically for /slack/events BEFORE other middleware
+app.use('/slack/events', express.raw({ type: 'application/json' }), receiver.router);
+
+// Apply other middleware for non-Slack routes
 app.use(express.json());
 app.use(cookieParser());
 app.use(express.urlencoded({ extended: false }));
@@ -51,11 +55,7 @@ app.use((req, res, next) => {
 // Routes setup
 app.use('/', authRoutes);
 
-// Use the ExpressReceiver's router for Slack events
-app.use('/slack/events', receiver.router);
-
 // Slack OAuth callback
-// backend/index.js
 app.get('/slack/oauth/callback', async (req, res) => {
   try {
     const response = await axios.post('https://slack.com/api/oauth.v2.access', {
