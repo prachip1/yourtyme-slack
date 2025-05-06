@@ -13,13 +13,14 @@ const { App, ExpressReceiver } = require('@slack/bolt');
 // Initialize ExpressReceiver for Slack Bolt
 const receiver = new ExpressReceiver({
   signingSecret: process.env.SLACK_SIGNING_SECRET,
-  endpoints: '/slack/events' // This defines the endpoint for Slack events
+  endpoints: '/slack/events',
+  app // Pass the Express app directly to the receiver
 });
 
 // Initialize Slack Bolt app with the receiver
 const slackApp = new App({
   token: process.env.SLACK_BOT_TOKEN,
-  receiver // Use the ExpressReceiver instance
+  receiver
 });
 
 // Database connection
@@ -28,10 +29,6 @@ mongoose.connect(process.env.MONGO_URL)
   .catch((err) => console.log("not connected", err));
 
 // Middleware setup
-// Apply raw body parsing specifically for /slack/events BEFORE other middleware
-app.use('/slack/events', express.raw({ type: 'application/json' }), receiver.router);
-
-// Apply other middleware for non-Slack routes
 app.use(express.json());
 app.use(cookieParser());
 app.use(express.urlencoded({ extended: false }));
@@ -246,4 +243,4 @@ app.listen(PORT, () => {
 });
 
 module.exports = app;
-module.exports.slackApp = slackApp; // Optional: export slackApp separately if needed
+module.exports.slackApp = slackApp;
