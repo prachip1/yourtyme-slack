@@ -13,7 +13,7 @@ const { App, ExpressReceiver } = require('@slack/bolt');
 // Initialize ExpressReceiver for Slack Bolt
 const receiver = new ExpressReceiver({
   signingSecret: process.env.SLACK_SIGNING_SECRET,
-  endpoints: '/slack/events' // This defines the endpoint for Slack events
+  endpoints: 'https://yourtyme-slack-backend.vercel.app/slack/events' // This defines the endpoint for Slack events
 });
 
 // Initialize Slack Bolt app with the receiver
