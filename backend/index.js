@@ -4,7 +4,7 @@ const dotenv = require('dotenv').config();
 const cors = require('cors');
 const mongoose = require('mongoose');
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 const cookieParser = require('cookie-parser');
 const axios = require('axios');
 const authRoutes = require('./routes/authRoutes');
@@ -55,13 +55,26 @@ app.use('/', authRoutes);
 // Slack OAuth callback
 app.get('/slack/oauth/callback', async (req, res) => {
   try {
+    if (!req.query.code) {
+      throw new Error('Missing code parameter in callback');
+    }
+    console.log('Received OAuth callback with code:', req.query.code);
+    console.log('Using client_id:', process.env.SLACK_CLIENT_ID);
+    console.log('Using redirect_uri:', 'https://yourtyme-slack-backend.vercel.app/slack/oauth/callback');
     const response = await axios.post('https://slack.com/api/oauth.v2.access', {
       client_id: process.env.SLACK_CLIENT_ID,
       client_secret: process.env.SLACK_CLIENT_SECRET,
       code: req.query.code,
       redirect_uri: 'https://yourtyme-slack-backend.vercel.app/slack/oauth/callback'
+    }, {
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      }
     });
     if (!response.data.ok) {
+      if (response.data.error === 'invalid_code') {
+        throw new Error('The authorization code is invalid or has expired. Please try again by starting a new OAuth flow.');
+      }
       throw new Error(`Slack API error: ${response.data.error}`);
     }
     const { access_token, authed_user, team } = response.data;
@@ -73,6 +86,7 @@ app.get('/slack/oauth/callback', async (req, res) => {
       { slackAccessToken: access_token, slackId: authed_user.id, name: authed_user.id, teamId: team.id },
       { upsert: true }
     );
+    console.log('Successfully stored user in database:', authed_user.id);
     res.redirect('https://yourtyme-slack.vercel.app/dashboard');
   } catch (error) {
     console.error('OAuth error:', error.message);
