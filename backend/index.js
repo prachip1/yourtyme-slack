@@ -87,7 +87,8 @@ app.get('/slack/oauth/callback', async (req, res) => {
       { upsert: true }
     );
     console.log('Successfully stored user in database:', authed_user.id);
-    res.redirect('https://yourtyme-slack.vercel.app/dashboard');
+    // Redirect to dashboard with slackId as a query parameter
+    res.redirect(`https://yourtyme-slack.vercel.app/dashboard?slackId=${authed_user.id}`);
   } catch (error) {
     console.error('OAuth error:', error.message);
     if (error.response) {
@@ -251,6 +252,27 @@ app.get('/api/worldtime', async (req, res) => {
   }
 });
 
+app.get('/api/user', async (req, res) => {
+  try {
+    const slackId = req.query.slackId;
+    if (!slackId) {
+      return res.status(400).json({ error: 'Missing Slack ID' });
+    }
+    const user = await mongoose.model('User').findOne({ slackId });
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    res.json({
+      slackId: user.slackId,
+      name: user.name,
+      city: user.city || 'Not set',
+      teamId: user.teamId,
+    });
+  } catch (error) {
+    console.error('Error fetching user:', error.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
 // Start Express server
 app.listen(PORT, () => {
   console.log(`server is listening to port ${PORT}`);
