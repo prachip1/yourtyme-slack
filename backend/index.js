@@ -320,15 +320,19 @@ slackApp.view('set_city_modal', async ({ view, ack, client, body }) => {
 
 // Handle /yourtyme slash command to open the modal
 slackApp.command('/yourtyme', async ({ command, ack, client }) => {
+  console.log('Received /yourtyme command:', command);
+
   await ack();
+  console.log('Acknowledged /yourtyme command');
 
   try {
     const userId = command.user_id;
-    let user = null;
+    console.log('Fetching user data for userId:', userId);
 
-    // Attempt to fetch user data, but don't fail if MongoDB is down
+    let user = null;
     try {
       user = await User.findOne({ slackId: userId });
+      console.log('User data fetched:', user);
     } catch (dbError) {
       console.error('MongoDB query failed:', dbError);
       // Continue without user data
@@ -361,19 +365,23 @@ slackApp.command('/yourtyme', async ({ command, ack, client }) => {
       },
     ];
 
+    console.log('Fetching channels for user');
     try {
       const channelsResponse = await client.conversations.list({
         types: 'public_channel,private_channel',
         exclude_archived: true,
       });
+      console.log('Channels fetched:', channelsResponse.channels);
 
       if (channelsResponse.channels && channelsResponse.channels.length > 0) {
         let hasMembers = false;
 
         for (const channel of channelsResponse.channels) {
+          console.log(`Fetching members for channel: ${channel.name}`);
           const membersResponse = await client.conversations.members({
             channel: channel.id,
           });
+          console.log(`Members for channel ${channel.name}:`, membersResponse.members);
 
           if (!membersResponse.members || membersResponse.members.length <= 1) continue;
 
@@ -382,9 +390,11 @@ slackApp.command('/yourtyme', async ({ command, ack, client }) => {
             if (memberId === userId) continue;
             try {
               const member = await User.findOne({ slackId: memberId });
+              console.log(`Member data for ${memberId}:`, member);
               if (member) {
                 const userInfo = await client.users.info({ user: memberId });
                 const displayName = userInfo.user?.real_name || userInfo.user?.name || memberId;
+                console.log(`User info for ${memberId}:`, userInfo);
                 membersWithCities.push({
                   slackId: memberId,
                   name: displayName,
@@ -393,7 +403,6 @@ slackApp.command('/yourtyme', async ({ command, ack, client }) => {
               }
             } catch (dbError) {
               console.error(`MongoDB query failed for member ${memberId}:`, dbError);
-              // Skip this member if MongoDB fails
             }
           }
 
@@ -461,7 +470,7 @@ slackApp.command('/yourtyme', async ({ command, ack, client }) => {
       });
     }
 
-    // Open the modal
+    console.log('Opening modal with blocks:', blocks);
     await client.views.open({
       trigger_id: command.trigger_id,
       view: {
@@ -472,6 +481,7 @@ slackApp.command('/yourtyme', async ({ command, ack, client }) => {
         blocks,
       },
     });
+    console.log('Modal opened successfully');
   } catch (error) {
     console.error('Error opening modal:', error);
     await client.chat.postMessage({
