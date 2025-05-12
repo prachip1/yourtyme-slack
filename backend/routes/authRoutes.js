@@ -1,4 +1,3 @@
-// routes/authRoutes.js
 const express = require('express');
 const router = express.Router();
 const {
@@ -11,11 +10,12 @@ const {
   deleteCity,
   getMembers,
   deleteAllMembers,
+  slackOAuthCallback,
 } = require('../controllers/authControllers');
 const authenticateToken = require('../middleware/authenticateToken');
 const slackAuth = require('../middleware/slackAuth');
 
-// Web routes (for debugging)
+// Web routes (for debugging and user management)
 router.get('/', test);
 router.get('/profile', authenticateToken, getProfile);
 router.post('/updatename', authenticateToken, updateUserName);
@@ -30,5 +30,6 @@ router.delete('/deletemembers', authenticateToken, deleteAllMembers);
 router.post('/slack/addcity', slackAuth, addCity);
 router.get('/slack/channel/:channel_id', slackAuth, getCommunityByTitle);
 router.get('/slack/channel/:channel_id/members', slackAuth, getMembers);
+router.get('/slack/oauth/callback', slackOAuthCallback);
 
 module.exports = router;

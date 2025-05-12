@@ -1,6 +1,6 @@
-// controllers/authControllers.js
 const User = require('../models/User');
 const Community = require('../models/Community');
+const axios = require('axios');
 
 // Test endpoint
 const test = (req, res) => {
@@ -45,8 +45,8 @@ const addCity = async (req, res) => {
         { channel_id },
         {
           $addToSet: {
-            members: { slackId: user_id, name: user.name || user_id, city }
-          }
+            members: { slackId: user_id, name: user.name || user_id, city },
+          },
         },
         { upsert: true }
       );
@@ -78,7 +78,7 @@ const getCommunityByTitle = async (req, res) => {
         channel_id,
         channel_name: channel_name || 'Unknown',
         members: [],
-        creator: req.user.slackId
+        creator: req.user.slackId,
       });
     }
     res.json(community);
@@ -125,6 +125,52 @@ const deleteAllMembers = async (req, res) => {
   }
 };
 
+// Slack OAuth Callback
+const slackOAuthCallback = async (req, res) => {
+  try {
+    if (!req.query.code) {
+      throw new Error('Missing code parameter in callback');
+    }
+    console.log('Received OAuth callback with code:', req.query.code);
+    console.log('Using client_id:', process.env.SLACK_CLIENT_ID);
+    console.log('Using redirect_uri:', 'https://yourtyme-slack-backend.vercel.app/slack/oauth/callback');
+    const response = await axios.post('https://slack.com/api/oauth.v2.access', {
+      client_id: process.env.SLACK_CLIENT_ID,
+      client_secret: process.env.SLACK_CLIENT_SECRET,
+      code: req.query.code,
+      redirect_uri: 'https://yourtyme-slack-backend.vercel.app/slack/oauth/callback',
+    }, {
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+    });
+    if (!response.data.ok) {
+      if (response.data.error === 'invalid_code') {
+        throw new Error('The authorization code is invalid or has expired. Please try again by starting a new OAuth flow.');
+      }
+      throw new Error(`Slack API error: ${response.data.error}`);
+    }
+    const { access_token, authed_user, team } = response.data;
+    if (!authed_user || !authed_user.id) {
+      throw new Error('authed_user is missing or invalid in Slack API response');
+    }
+    console.log('Saving user to database:', { slackId: authed_user.id, teamId: team.id });
+    await User.updateOne(
+      { slackId: authed_user.id },
+      { slackAccessToken: access_token, slackId: authed_user.id, name: authed_user.id, teamId: team.id },
+      { upsert: true }
+    );
+    console.log('Successfully stored user in database:', authed_user.id);
+    res.redirect(`https://yourtyme-slack.vercel.app/dashboard?slackId=${authed_user.id}`);
+  } catch (error) {
+    console.error('OAuth error:', error.message);
+    if (error.response) {
+      console.error('Slack API response:', error.response.data);
+    }
+    res.status(500).send(`Authentication failed: ${error.message}`);
+  }
+};
+
 module.exports = {
   test,
   getProfile,
@@ -135,4 +181,5 @@ module.exports = {
   deleteCity,
   getMembers,
   deleteAllMembers,
+  slackOAuthCallback,
 };
