@@ -43,7 +43,7 @@ const Dashboard = () => {
       <p><strong>City:</strong> {user.city}</p>
       <p><strong>Team ID:</strong> {user.teamId}</p>
       <a
-        href={`https://slack.com/app_redirect?app=${process.env.VITE_SLACK_APP_ID}`}
+        href={`https://slack.com/app_redirect?app=${import.meta.env.VITE_SLACK_APP_ID}`}
         style={{
           display: 'inline-block',
           marginTop: '20px',
