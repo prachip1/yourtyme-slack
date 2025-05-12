@@ -26,18 +26,28 @@ const slackApp = new App({
 
 // Database connection
 const connectToDatabase = async () => {
-  try {
-    await mongoose.connect(process.env.MONGO_URL, {
-      serverSelectionTimeoutMS: 30000,
-      connectTimeoutMS: 30000,
-      socketTimeoutMS: 45000,
-      retryWrites: true,
-      w: 'majority',
-    });
-    console.log('db connected');
-  } catch (err) {
-    console.error('not connected', err);
-    process.exit(1);
+  let retries = 5;
+  while (retries > 0) {
+    try {
+      await mongoose.connect(process.env.MONGO_URL, {
+        serverSelectionTimeoutMS: 30000,
+        connectTimeoutMS: 30000,
+        socketTimeoutMS: 45000,
+        retryWrites: true,
+        w: 'majority',
+      });
+      console.log('db connected');
+      return; // Exit the loop if successful
+    } catch (err) {
+      console.error('MongoDB connection failed:', err);
+      retries -= 1;
+      if (retries === 0) {
+        console.error('Max retries reached. Could not connect to MongoDB.');
+        process.exit(1);
+      }
+      console.log(`Retrying connection (${retries} attempts left)...`);
+      await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds before retrying
+    }
   }
 };
 
@@ -335,9 +345,16 @@ slackApp.command('/yourtyme', async ({ command, ack, client }) => {
 
   try {
     const userId = command.user_id;
-    const user = await User.findOne({ slackId: userId });
+    let user = null;
 
-    // Build the modal blocks
+    // Attempt to fetch user data, but don't fail if MongoDB is down
+    try {
+      user = await User.findOne({ slackId: userId });
+    } catch (dbError) {
+      console.error('MongoDB query failed:', dbError);
+      // Continue without user data
+    }
+
     const blocks = [
       {
         type: 'header',
@@ -365,93 +382,102 @@ slackApp.command('/yourtyme', async ({ command, ack, client }) => {
       },
     ];
 
-    // Fetch the list of channels the user is part of
-    const channelsResponse = await client.conversations.list({
-      types: 'public_channel,private_channel',
-      exclude_archived: true,
-    });
+    try {
+      const channelsResponse = await client.conversations.list({
+        types: 'public_channel,private_channel',
+        exclude_archived: true,
+      });
 
-    if (channelsResponse.channels && channelsResponse.channels.length > 0) {
-      let hasMembers = false;
+      if (channelsResponse.channels && channelsResponse.channels.length > 0) {
+        let hasMembers = false;
 
-      for (const channel of channelsResponse.channels) {
-        // Fetch members of the channel
-        const membersResponse = await client.conversations.members({
-          channel: channel.id,
-        });
+        for (const channel of channelsResponse.channels) {
+          const membersResponse = await client.conversations.members({
+            channel: channel.id,
+          });
 
-        if (!membersResponse.members || membersResponse.members.length <= 1) continue; // Skip if no other members
+          if (!membersResponse.members || membersResponse.members.length <= 1) continue;
 
-        // Fetch user data for all members
-        const membersWithCities = [];
-        for (const memberId of membersResponse.members) {
-          if (memberId === userId) continue; // Skip the current user
-          const member = await User.findOne({ slackId: memberId });
-          if (member) {
-            // Fetch member's display name from Slack
-            const userInfo = await client.users.info({ user: memberId });
-            const displayName = userInfo.user?.real_name || userInfo.user?.name || memberId;
+          const membersWithCities = [];
+          for (const memberId of membersResponse.members) {
+            if (memberId === userId) continue;
+            try {
+              const member = await User.findOne({ slackId: memberId });
+              if (member) {
+                const userInfo = await client.users.info({ user: memberId });
+                const displayName = userInfo.user?.real_name || userInfo.user?.name || memberId;
+                membersWithCities.push({
+                  slackId: memberId,
+                  name: displayName,
+                  city: member.city,
+                });
+              }
+            } catch (dbError) {
+              console.error(`MongoDB query failed for member ${memberId}:`, dbError);
+              // Skip this member if MongoDB fails
+            }
+          }
 
-            membersWithCities.push({
-              slackId: memberId,
-              name: displayName,
-              city: member.city,
+          if (membersWithCities.length === 0) continue;
+
+          hasMembers = true;
+
+          blocks.push(
+            {
+              type: 'divider',
+            },
+            {
+              type: 'header',
+              text: { type: 'plain_text', text: `#${channel.name}` },
+            }
+          );
+
+          for (const member of membersWithCities) {
+            let timeText = `${member.city || 'No city set'}`;
+            if (member.city) {
+              try {
+                const timeResponse = await axios.get(`https://yourtyme-slack-backend.vercel.app/api/worldtime?city=${member.city}`);
+                const { datetime, timezone } = timeResponse.data;
+                timeText = `${datetime} (${timezone})`;
+              } catch (error) {
+                timeText = 'Time unavailable (API key missing)';
+              }
+            }
+            blocks.push({
+              type: 'section',
+              text: {
+                type: 'mrkdwn',
+                text: `*${member.name}*: ${timeText}`,
+              },
             });
           }
         }
 
-        if (membersWithCities.length === 0) continue;
-
-        hasMembers = true;
-
-        // Add channel header
-        blocks.push(
-          {
-            type: 'divider',
-          },
-          {
-            type: 'header',
-            text: { type: 'plain_text', text: `#${channel.name}` },
-          }
-        );
-
-        // Add each member's timezone
-        for (const member of membersWithCities) {
-          let timeText = `${member.city || 'No city set'}`;
-          if (member.city) {
-            try {
-              const timeResponse = await axios.get(`https://yourtyme-slack-backend.vercel.app/api/worldtime?city=${member.city}`);
-              const { datetime, timezone } = timeResponse.data;
-              timeText = `${datetime} (${timezone})`;
-            } catch (error) {
-              timeText = 'Time unavailable (API key missing)';
-            }
-          }
+        if (!hasMembers) {
           blocks.push({
             type: 'section',
             text: {
               type: 'mrkdwn',
-              text: `*${member.name}*: ${timeText}`,
+              text: 'No other members with cities set in your channels. Invite others to set their city! 😊',
             },
           });
         }
-      }
-
-      if (!hasMembers) {
+      } else {
         blocks.push({
           type: 'section',
           text: {
             type: 'mrkdwn',
-            text: 'No other members with cities set in your channels. Invite others to set their city! 😊',
+            text: 'You’re not in any channels yet. Join a channel to see member timezones! 📢',
           },
         });
       }
-    } else {
+    } catch (slackError) {
+      console.error('Slack API error:', slackError);
       blocks.push({
         type: 'section',
         text: {
           type: 'mrkdwn',
-          text: 'You’re not in any channels yet. Join a channel to see member timezones! 📢',
+          text: '⚠️ Unable to fetch channel data. Please try again later.',
         },
       });
     }
