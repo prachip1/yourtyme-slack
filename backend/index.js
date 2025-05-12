@@ -326,16 +326,62 @@ slackApp.command('/yourtyme', async ({ command, ack, client }) => {
   console.log('Acknowledged /yourtyme command');
 
   try {
+    if (!command.trigger_id) {
+      console.error('No trigger_id provided in command');
+      await client.chat.postMessage({
+        channel: command.user_id,
+        text: 'Error: Unable to open modal due to missing trigger_id.',
+      });
+      return;
+    }
+
+    // Open a "loading" modal immediately
+    const initialView = await client.views.open({
+      trigger_id: command.trigger_id,
+      view: {
+        type: 'modal',
+        callback_id: 'timezone_view',
+        title: { type: 'plain_text', text: 'YourTyme Timezone Tool' },
+        close: { type: 'plain_text', text: 'Close' },
+        blocks: [
+          {
+            type: 'header',
+            text: { type: 'plain_text', text: '🌍 YourTyme Timezone Tool' },
+          },
+          {
+            type: 'section',
+            text: { type: 'mrkdwn', text: 'Loading your timezone data... ⏳' },
+          },
+        ],
+      },
+    });
+    console.log('Initial modal opened:', initialView);
+
+    // Now fetch the data and update the modal
     const userId = command.user_id;
     console.log('Fetching user data for userId:', userId);
 
     let user = null;
     try {
-      user = await User.findOne({ slackId: userId });
-      console.log('User data fetched:', user);
+      let retries = 3;
+      while (retries > 0) {
+        try {
+          user = await User.findOne({ slackId: userId }).timeout(5000);
+          console.log('User data fetched:', user);
+          break;
+        } catch (dbError) {
+          console.error('MongoDB query attempt failed:', dbError);
+          retries -= 1;
+          if (retries === 0) {
+            console.error('Max retries reached for MongoDB query');
+            throw dbError;
+          }
+          console.log(`Retrying MongoDB query (${retries} attempts left)...`);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+      }
     } catch (dbError) {
       console.error('MongoDB query failed:', dbError);
-      // Continue without user data
     }
 
     const blocks = [
@@ -367,21 +413,53 @@ slackApp.command('/yourtyme', async ({ command, ack, client }) => {
 
     console.log('Fetching channels for user');
     try {
-      const channelsResponse = await client.conversations.list({
-        types: 'public_channel,private_channel',
-        exclude_archived: true,
-      });
-      console.log('Channels fetched:', channelsResponse.channels);
+      let channelsResponse = null;
+      let retries = 3;
+      while (retries > 0) {
+        try {
+          channelsResponse = await client.conversations.list({
+            types: 'public_channel,private_channel',
+            exclude_archived: true,
+          });
+          console.log('Channels fetched:', channelsResponse.channels);
+          break;
+        } catch (slackError) {
+          console.error('Slack API attempt failed (conversations.list):', slackError);
+          retries -= 1;
+          if (retries === 0) {
+            console.error('Max retries reached for conversations.list');
+            throw slackError;
+          }
+          console.log(`Retrying conversations.list (${retries} attempts left)...`);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+      }
 
       if (channelsResponse.channels && channelsResponse.channels.length > 0) {
         let hasMembers = false;
 
         for (const channel of channelsResponse.channels) {
           console.log(`Fetching members for channel: ${channel.name}`);
-          const membersResponse = await client.conversations.members({
-            channel: channel.id,
-          });
-          console.log(`Members for channel ${channel.name}:`, membersResponse.members);
+          let membersResponse = null;
+          retries = 3;
+          while (retries > 0) {
+            try {
+              membersResponse = await client.conversations.members({
+                channel: channel.id,
+              });
+              console.log(`Members for channel ${channel.name}:`, membersResponse.members);
+              break;
+            } catch (slackError) {
+              console.error('Slack API attempt failed (conversations.members):', slackError);
+              retries -= 1;
+              if (retries === 0) {
+                console.error('Max retries reached for conversations.members');
+                throw slackError;
+              }
+              console.log(`Retrying conversations.members (${retries} attempts left)...`);
+              await new Promise(resolve => setTimeout(resolve, 2000));
+            }
+          }
 
           if (!membersResponse.members || membersResponse.members.length <= 1) continue;
 
@@ -389,12 +467,28 @@ slackApp.command('/yourtyme', async ({ command, ack, client }) => {
           for (const memberId of membersResponse.members) {
             if (memberId === userId) continue;
             try {
-              const member = await User.findOne({ slackId: memberId });
+              const member = await User.findOne({ slackId: memberId }).timeout(5000);
               console.log(`Member data for ${memberId}:`, member);
               if (member) {
-                const userInfo = await client.users.info({ user: memberId });
+                let userInfo = null;
+                retries = 3;
+                while (retries > 0) {
+                  try {
+                    userInfo = await client.users.info({ user: memberId });
+                    console.log(`User info for ${memberId}:`, userInfo);
+                    break;
+                  } catch (slackError) {
+                    console.error('Slack API attempt failed (users.info):', slackError);
+                    retries -= 1;
+                    if (retries === 0) {
+                      console.error('Max retries reached for users.info');
+                      throw slackError;
+                    }
+                    console.log(`Retrying users.info (${retries} attempts left)...`);
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+                  }
+                }
                 const displayName = userInfo.user?.real_name || userInfo.user?.name || memberId;
-                console.log(`User info for ${memberId}:`, userInfo);
                 membersWithCities.push({
                   slackId: memberId,
                   name: displayName,
@@ -470,9 +564,10 @@ slackApp.command('/yourtyme', async ({ command, ack, client }) => {
       });
     }
 
-    console.log('Opening modal with blocks:', blocks);
-    await client.views.open({
-      trigger_id: command.trigger_id,
+    // Update the modal with the fetched data
+    console.log('Updating modal with blocks:', blocks);
+    const updateResponse = await client.views.update({
+      view_id: initialView.view.id,
       view: {
         type: 'modal',
         callback_id: 'timezone_view',
@@ -481,9 +576,9 @@ slackApp.command('/yourtyme', async ({ command, ack, client }) => {
         blocks,
       },
     });
-    console.log('Modal opened successfully');
+    console.log('Modal updated:', updateResponse);
   } catch (error) {
-    console.error('Error opening modal:', error);
+    console.error('Error handling /yourtyme command:', error);
     await client.chat.postMessage({
       channel: command.user_id,
       text: 'Error opening YourTyme modal: ' + error.message,
