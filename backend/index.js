@@ -78,75 +78,20 @@ app.use('/', authRoutes);
 // App Home tab
 slackApp.event('app_home_opened', async ({ event, client }) => {
   try {
-    const user = await User.findOne({ slackId: event.user });
-    const communities = await Community.find({
-      members: { $elemMatch: { slackId: event.user } },
-    });
-
-    const blocks = [
-      {
-        type: 'header',
-        text: { type: 'plain_text', text: 'Timezone Tool' },
-      },
-      {
-        type: 'section',
-        text: { type: 'mrkdwn', text: user?.city ? `Your city: ${user.city}` : 'No city set.' },
-      },
-      {
-        type: 'actions',
-        elements: [
-          {
-            type: 'button',
-            text: { type: 'plain_text', text: 'Set City' },
-            action_id: 'set_city',
-          },
-        ],
-      },
-    ];
-
-    if (communities.length) {
-      for (const community of communities) {
-        blocks.push(
-          {
-            type: 'divider',
-          },
-          {
-            type: 'header',
-            text: { type: 'plain_text', text: `#${community.channel_name || community.channel_id}` },
-          }
-        );
-        for (const member of community.members) {
-          let timeText = `${member.city || 'No city set'}`;
-          if (member.city) {
-            try {
-              const timeResponse = await axios.get(`https://yourtyme-slack-backend.vercel.app/api/worldtime?city=${member.city}`);
-              const { datetime, timezone } = timeResponse.data;
-              timeText = `${datetime} (${timezone})`;
-            } catch (error) {
-              timeText = 'Time unavailable';
-            }
-          }
-          blocks.push({
-            type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text: `*${member.name || member.slackId}*: ${timeText}`,
-            },
-          });
-        }
-      }
-    } else {
-      blocks.push({
-        type: 'section',
-        text: { type: 'mrkdwn', text: 'Join a channel and set your city to see timezones!' },
-      });
-    }
-
     await client.views.publish({
       user_id: event.user,
       view: {
         type: 'home',
-        blocks,
+        blocks: [
+          {
+            type: 'header',
+            text: { type: 'plain_text', text: '🌍 YourTyme Timezone Tool' },
+          },
+          {
+            type: 'section',
+            text: { type: 'mrkdwn', text: 'Use the `/yourtyme` command to view and manage team timezones!' },
+          },
+        ],
       },
     });
   } catch (error) {
@@ -185,56 +130,74 @@ slackApp.view('set_city_modal', async ({ view, ack, client, body }) => {
   const city = view.state.values.city.user_city.value;
   const user_id = view.submitter;
   const channel_id = view.private_metadata;
+
+  let updatedUser = null;
+  let userUpdateSuccess = false;
+
+  // Attempt to update the user's city
   try {
     const user = await axios.post('https://yourtyme-slack-backend.vercel.app/slack/addcity', {
       user_id,
       city,
       channel_id,
     });
+    userUpdateSuccess = true;
+    updatedUser = await User.findOne({ slackId: user_id });
+  } catch (error) {
+    console.error('Error updating user city:', error);
+    updatedUser = { city: 'Not set (update failed)' };
+  }
 
-    if (channel_id) {
+  // Attempt to update the community (if channel_id exists)
+  if (channel_id && userUpdateSuccess) {
+    try {
       await Community.updateOne(
         { channel_id },
         {
           $addToSet: {
-            members: { slackId: user_id, name: user.data.name || user_id, city },
+            members: { slackId: user_id, name: updatedUser?.name || user_id, city },
           },
         },
         { upsert: true }
       );
+    } catch (error) {
+      console.error('Error updating community:', error);
     }
+  }
 
-    // Fetch updated data for the modal
-    const updatedUser = await User.findOne({ slackId: user_id });
+  // Fetch updated data for the modal
+  const blocks = [
+    {
+      type: 'header',
+      text: { type: 'plain_text', text: '🌍 YourTyme Timezone Tool' },
+    },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: userUpdateSuccess
+          ? `*Your City:* ${updatedUser.city} ✅\nYour city has been updated to ${city}! 🎉`
+          : `*Your City:* Failed to update city due to database issues. Please try again later. ⚠️`,
+      },
+    },
+    {
+      type: 'actions',
+      elements: [
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Update City' },
+          action_id: 'set_city',
+          style: 'primary',
+        },
+      ],
+    },
+  ];
+
+  try {
     const channelsResponse = await client.conversations.list({
       types: 'public_channel,private_channel',
       exclude_archived: true,
     });
-
-    const blocks = [
-      {
-        type: 'header',
-        text: { type: 'plain_text', text: '🌍 YourTyme Timezone Tool' },
-      },
-      {
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: `*Your City:* ${updatedUser.city} ✅\nYour city has been updated!`,
-        },
-      },
-      {
-        type: 'actions',
-        elements: [
-          {
-            type: 'button',
-            text: { type: 'plain_text', text: 'Update City' },
-            action_id: 'set_city',
-            style: 'primary',
-          },
-        ],
-      },
-    ];
 
     if (channelsResponse.channels && channelsResponse.channels.length > 0) {
       let hasMembers = false;
@@ -249,15 +212,19 @@ slackApp.view('set_city_modal', async ({ view, ack, client, body }) => {
         const membersWithCities = [];
         for (const memberId of membersResponse.members) {
           if (memberId === user_id) continue;
-          const member = await User.findOne({ slackId: memberId });
-          if (member) {
-            const userInfo = await client.users.info({ user: memberId });
-            const displayName = userInfo.user?.real_name || userInfo.user?.name || memberId;
-            membersWithCities.push({
-              slackId: memberId,
-              name: displayName,
-              city: member.city,
-            });
+          try {
+            const member = await User.findOne({ slackId: memberId });
+            if (member) {
+              const userInfo = await client.users.info({ user: memberId });
+              const displayName = userInfo.user?.real_name || userInfo.user?.name || memberId;
+              membersWithCities.push({
+                slackId: memberId,
+                name: displayName,
+                city: member.city,
+              });
+            }
+          } catch (dbError) {
+            console.error(`MongoDB query failed for member ${memberId}:`, dbError);
           }
         }
 
@@ -314,27 +281,39 @@ slackApp.view('set_city_modal', async ({ view, ack, client, body }) => {
         },
       });
     }
-
-    // Update the original modal
-    await client.views.update({
-      view_id: body.view.root_view_id,
-      view: {
-        type: 'modal',
-        callback_id: 'timezone_view',
-        title: { type: 'plain_text', text: 'YourTyme Timezone Tool' },
-        close: { type: 'plain_text', text: 'Close' },
-        blocks,
+  } catch (slackError) {
+    console.error('Slack API error:', slackError);
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: '⚠️ Unable to fetch channel data. Please try again later.',
       },
     });
+  }
 
+  // Update the original modal
+  await client.views.update({
+    view_id: body.view.root_view_id,
+    view: {
+      type: 'modal',
+      callback_id: 'timezone_view',
+      title: { type: 'plain_text', text: 'YourTyme Timezone Tool' },
+      close: { type: 'plain_text', text: 'Close' },
+      blocks,
+    },
+  });
+
+  // Send a confirmation message (since messaging is now enabled)
+  if (userUpdateSuccess) {
     await client.chat.postMessage({
       channel: user_id,
       text: `City set to ${city}! The modal has been updated with your new timezone. 🎉`,
     });
-  } catch (error) {
+  } else {
     await client.chat.postMessage({
       channel: user_id,
-      text: 'Error setting city: ' + (error.response?.data?.error || error.message),
+      text: 'Failed to update your city due to database issues. Please try again later. ⚠️',
     });
   }
 });
