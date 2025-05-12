@@ -169,7 +169,8 @@ slackApp.action('set_city', async ({ body, ack, client }) => {
 });
 
 // Handle city modal submission
-slackApp.view('set_city_modal', async ({ view, ack, client }) => {
+// Handle city modal submission
+slackApp.view('set_city_modal', async ({ view, ack, client, body }) => {
   await ack();
   const city = view.state.values.city.user_city.value;
   const user_id = view.submitter;
@@ -193,9 +194,132 @@ slackApp.view('set_city_modal', async ({ view, ack, client }) => {
       );
     }
 
+    // Fetch updated data for the modal
+    const updatedUser = await User.findOne({ slackId: user_id });
+    const channelsResponse = await client.conversations.list({
+      types: 'public_channel,private_channel',
+      exclude_archived: true,
+    });
+
+    const blocks = [
+      {
+        type: 'header',
+        text: { type: 'plain_text', text: '🌍 YourTyme Timezone Tool' },
+      },
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `*Your City:* ${updatedUser.city} ✅\nYour city has been updated!`,
+        },
+      },
+      {
+        type: 'actions',
+        elements: [
+          {
+            type: 'button',
+            text: { type: 'plain_text', text: 'Update City' },
+            action_id: 'set_city',
+            style: 'primary',
+          },
+        ],
+      },
+    ];
+
+    if (channelsResponse.channels && channelsResponse.channels.length > 0) {
+      let hasMembers = false;
+
+      for (const channel of channelsResponse.channels) {
+        const membersResponse = await client.conversations.members({
+          channel: channel.id,
+        });
+
+        if (!membersResponse.members || membersResponse.members.length <= 1) continue;
+
+        const membersWithCities = [];
+        for (const memberId of membersResponse.members) {
+          if (memberId === user_id) continue;
+          const member = await User.findOne({ slackId: memberId });
+          if (member) {
+            const userInfo = await client.users.info({ user: memberId });
+            const displayName = userInfo.user?.real_name || userInfo.user?.name || memberId;
+            membersWithCities.push({
+              slackId: memberId,
+              name: displayName,
+              city: member.city,
+            });
+          }
+        }
+
+        if (membersWithCities.length === 0) continue;
+
+        hasMembers = true;
+
+        blocks.push(
+          {
+            type: 'divider',
+          },
+          {
+            type: 'header',
+            text: { type: 'plain_text', text: `#${channel.name}` },
+          }
+        );
+
+        for (const member of membersWithCities) {
+          let timeText = `${member.city || 'No city set'}`;
+          if (member.city) {
+            try {
+              const timeResponse = await axios.get(`https://yourtyme-slack-backend.vercel.app/api/worldtime?city=${member.city}`);
+              const { datetime, timezone } = timeResponse.data;
+              timeText = `${datetime} (${timezone})`;
+            } catch (error) {
+              timeText = 'Time unavailable (API key missing)';
+            }
+          }
+          blocks.push({
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `*${member.name}*: ${timeText}`,
+            },
+          });
+        }
+      }
+
+      if (!hasMembers) {
+        blocks.push({
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: 'No other members with cities set in your channels. Invite others to set their city! 😊',
+          },
+        });
+      }
+    } else {
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: 'You’re not in any channels yet. Join a channel to see member timezones! 📢',
+        },
+      });
+    }
+
+    // Update the original modal
+    await client.views.update({
+      view_id: body.view.root_view_id,
+      view: {
+        type: 'modal',
+        callback_id: 'timezone_view',
+        title: { type: 'plain_text', text: 'YourTyme Timezone Tool' },
+        close: { type: 'plain_text', text: 'Close' },
+        blocks,
+      },
+    });
+
     await client.chat.postMessage({
       channel: user_id,
-      text: `City set to ${city}! Check the App Home tab to see timezones.`,
+      text: `City set to ${city}! The modal has been updated with your new timezone. 🎉`,
     });
   } catch (error) {
     await client.chat.postMessage({
@@ -205,6 +329,152 @@ slackApp.view('set_city_modal', async ({ view, ack, client }) => {
   }
 });
 
+// Handle /yourtyme slash command to open the modal
+slackApp.command('/yourtyme', async ({ command, ack, client }) => {
+  await ack();
+
+  try {
+    const userId = command.user_id;
+    const user = await User.findOne({ slackId: userId });
+
+    // Build the modal blocks
+    const blocks = [
+      {
+        type: 'header',
+        text: { type: 'plain_text', text: '🌍 YourTyme Timezone Tool' },
+      },
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: user?.city
+            ? `*Your City:* ${user.city}`
+            : '*Your City:* Not set. Set your city to share your timezone with others! 🌟',
+        },
+      },
+      {
+        type: 'actions',
+        elements: [
+          {
+            type: 'button',
+            text: { type: 'plain_text', text: user?.city ? 'Update City' : 'Set City' },
+            action_id: 'set_city',
+            style: user?.city ? 'primary' : 'danger',
+          },
+        ],
+      },
+    ];
+
+    // Fetch the list of channels the user is part of
+    const channelsResponse = await client.conversations.list({
+      types: 'public_channel,private_channel',
+      exclude_archived: true,
+    });
+
+    if (channelsResponse.channels && channelsResponse.channels.length > 0) {
+      let hasMembers = false;
+
+      for (const channel of channelsResponse.channels) {
+        // Fetch members of the channel
+        const membersResponse = await client.conversations.members({
+          channel: channel.id,
+        });
+
+        if (!membersResponse.members || membersResponse.members.length <= 1) continue; // Skip if no other members
+
+        // Fetch user data for all members
+        const membersWithCities = [];
+        for (const memberId of membersResponse.members) {
+          if (memberId === userId) continue; // Skip the current user
+          const member = await User.findOne({ slackId: memberId });
+          if (member) {
+            // Fetch member's display name from Slack
+            const userInfo = await client.users.info({ user: memberId });
+            const displayName = userInfo.user?.real_name || userInfo.user?.name || memberId;
+
+            membersWithCities.push({
+              slackId: memberId,
+              name: displayName,
+              city: member.city,
+            });
+          }
+        }
+
+        if (membersWithCities.length === 0) continue;
+
+        hasMembers = true;
+
+        // Add channel header
+        blocks.push(
+          {
+            type: 'divider',
+          },
+          {
+            type: 'header',
+            text: { type: 'plain_text', text: `#${channel.name}` },
+          }
+        );
+
+        // Add each member's timezone
+        for (const member of membersWithCities) {
+          let timeText = `${member.city || 'No city set'}`;
+          if (member.city) {
+            try {
+              const timeResponse = await axios.get(`https://yourtyme-slack-backend.vercel.app/api/worldtime?city=${member.city}`);
+              const { datetime, timezone } = timeResponse.data;
+              timeText = `${datetime} (${timezone})`;
+            } catch (error) {
+              timeText = 'Time unavailable (API key missing)';
+            }
+          }
+          blocks.push({
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `*${member.name}*: ${timeText}`,
+            },
+          });
+        }
+      }
+
+      if (!hasMembers) {
+        blocks.push({
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: 'No other members with cities set in your channels. Invite others to set their city! 😊',
+          },
+        });
+      }
+    } else {
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: 'You’re not in any channels yet. Join a channel to see member timezones! 📢',
+        },
+      });
+    }
+
+    // Open the modal
+    await client.views.open({
+      trigger_id: command.trigger_id,
+      view: {
+        type: 'modal',
+        callback_id: 'timezone_view',
+        title: { type: 'plain_text', text: 'YourTyme Timezone Tool' },
+        close: { type: 'plain_text', text: 'Close' },
+        blocks,
+      },
+    });
+  } catch (error) {
+    console.error('Error opening modal:', error);
+    await client.chat.postMessage({
+      channel: command.user_id,
+      text: 'Error opening YourTyme modal: ' + error.message,
+    });
+  }
+});
 // World time API route
 app.options('/api/worldtime', cors(corsOptions));
 app.get('/api/worldtime', async (req, res) => {
