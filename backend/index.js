@@ -37,7 +37,7 @@ const connectToDatabase = async () => {
         w: 'majority',
       });
       console.log('db connected');
-      return;
+      return; // Exit the loop if successful
     } catch (err) {
       console.error('MongoDB connection failed:', err);
       retries -= 1;
@@ -46,7 +46,7 @@ const connectToDatabase = async () => {
         process.exit(1);
       }
       console.log(`Retrying connection (${retries} attempts left)...`);
-      await new Promise(resolve => setTimeout(resolve, 5000));
+      await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds before retrying
     }
   }
 };
@@ -58,7 +58,7 @@ app.use(express.urlencoded({ extended: false }));
 
 // CORS setup
 const corsOptions = {
-  origin: ['http://localhost:517, 'https://yourtyme-slack.vercel.app'],
+  origin: ['http://localhost:5173', 'https://yourtyme-slack.vercel.app'],
   credentials: true,
   optionsSuccessStatus: 200,
 };
@@ -94,7 +94,6 @@ slackApp.event('app_home_opened', async ({ event, client }) => {
         ],
       },
     });
-    console.log('App Home published for user:', event.user);
   } catch (error) {
     console.error('App Home error:', error);
   }
@@ -102,61 +101,54 @@ slackApp.event('app_home_opened', async ({ event, client }) => {
 
 // Handle set city button
 slackApp.action('set_city', async ({ body, ack, client }) => {
-  console.log('Received set_city action:', body);
   await ack();
-  try {
-    await client.views.open({
-      trigger_id: body.trigger_id,
-      view: {
-        type: 'modal',
-        callback_id: 'set_city_modal',
-        title: { type: 'plain_text', text: 'Set Your City' },
-        submit: { type: 'plain_text', text: 'Save' },
-        close: { type: 'plain_text', text: 'Cancel' },
-        blocks: [
-          {
-            type: 'input',
-            block_id: 'city',
-            element: { type: 'plain_text_input', action_id: 'user_city' },
-            label: { type: 'plain_text', text: 'City (e.g., London)' },
-          },
-        ],
-        private_metadata: body.channel_id || '',
-      },
-    });
-    console.log('Set city modal opened for trigger_id:', body.trigger_id);
-  } catch (error) {
-    console.error('Error opening set city modal:', error);
-  }
+  await client.views.open({
+    trigger_id: body.trigger_id,
+    view: {
+      type: 'modal',
+      callback_id: 'set_city_modal',
+      title: { type: 'plain_text', text: 'Set Your City' },
+      submit: { type: 'plain_text', text: 'Save' },
+      close: { type: 'plain_text', text: 'Cancel' },
+      blocks: [
+        {
+          type: 'input',
+          block_id: 'city',
+          element: { type: 'plain_text_input', action_id: 'user_city' },
+          label: { type: 'plain_text', text: 'City (e.g., London)' },
+        },
+      ],
+      private_metadata: body.channel_id || '',
+    },
+  });
 });
 
 // Handle city modal submission
+// Handle city modal submission
 slackApp.view('set_city_modal', async ({ view, ack, client, body }) => {
-  console.log('Received set_city_modal submission:', view);
   await ack();
   const city = view.state.values.city.user_city.value;
-  const user_id = body.user.id;
+  const user_id = view.submitter;
   const channel_id = view.private_metadata;
 
   let updatedUser = null;
   let userUpdateSuccess = false;
 
-  // Update user's city
+  // Attempt to update the user's city
   try {
-    const userResponse = await axios.post('https://yourtyme-slack-backend.vercel.app/slack/addcity', {
+    const user = await axios.post('https://yourtyme-slack-backend.vercel.app/slack/addcity', {
       user_id,
       city,
       channel_id,
     });
     userUpdateSuccess = true;
     updatedUser = await User.findOne({ slackId: user_id });
-    console.log('User city updated:', updatedUser);
   } catch (error) {
     console.error('Error updating user city:', error);
     updatedUser = { city: 'Not set (update failed)' };
   }
 
-  // Update community
+  // Attempt to update the community (if channel_id exists)
   if (channel_id && userUpdateSuccess) {
     try {
       await Community.updateOne(
@@ -168,13 +160,12 @@ slackApp.view('set_city_modal', async ({ view, ack, client, body }) => {
         },
         { upsert: true }
       );
-      console.log('Community updated for channel:', channel_id);
     } catch (error) {
       console.error('Error updating community:', error);
     }
   }
 
-  // Fetch channel and member data
+  // Fetch updated data for the modal
   const blocks = [
     {
       type: 'header',
@@ -242,7 +233,9 @@ slackApp.view('set_city_modal', async ({ view, ack, client, body }) => {
         hasMembers = true;
 
         blocks.push(
-          { type: 'divider' },
+          {
+            type: 'divider',
+          },
           {
             type: 'header',
             text: { type: 'plain_text', text: `#${channel.name}` },
@@ -300,37 +293,33 @@ slackApp.view('set_city_modal', async ({ view, ack, client, body }) => {
   }
 
   // Update the original modal
-  try {
-    await client.views.update({
-      view_id: body.view.root_view_id,
-      view: {
-        type: 'modal',
-        callback_id: 'timezone_view',
-        title: { type: 'plain_text', text: 'YourTyme Timezone Tool' },
-        close: { type: 'plain_text', text: 'Close' },
-        blocks,
-      },
-    });
-    console.log('Timezone view updated for view_id:', body.view.root_view_id);
-  } catch (error) {
-    console.error('Error updating timezone view:', error);
-  }
+  await client.views.update({
+    view_id: body.view.root_view_id,
+    view: {
+      type: 'modal',
+      callback_id: 'timezone_view',
+      title: { type: 'plain_text', text: 'YourTyme Timezone Tool' },
+      close: { type: 'plain_text', text: 'Close' },
+      blocks,
+    },
+  });
 
-  // Send confirmation message
-  try {
+  // Send a confirmation message (since messaging is now enabled)
+  if (userUpdateSuccess) {
     await client.chat.postMessage({
       channel: user_id,
-      text: userUpdateSuccess
-        ? `City set to ${city}! The modal has been updated with your new timezone. 🎉`
-        : 'Failed to update your city due to database issues. Please try again later. ⚠️',
+      text: `City set to ${city}! The modal has been updated with your new timezone. 🎉`,
     });
-    console.log('Confirmation message sent to user:', user_id);
-  } catch (error) {
-    console.error('Error sending confirmation message:', error);
+  } else {
+    await client.chat.postMessage({
+      channel: user_id,
+      text: 'Failed to update your city due to database issues. Please try again later. ⚠️',
+    });
   }
 });
 
 // Handle /yourtyme slash command to open the modal
+
 slackApp.command('/yourtyme', async ({ command, ack, client }) => {
   console.log('Received /yourtyme command:', command);
   try {
@@ -442,6 +431,7 @@ slackApp.view('timezone_view', async ({ view, ack, client, body }) => {
     }
 
     // Push results modal
+    console.log('Pushing results modal with trigger_id:', body.trigger_id);
     const resultView = await client.views.push({
       trigger_id: body.trigger_id,
       view: {
@@ -486,7 +476,6 @@ slackApp.view('timezone_view', async ({ view, ack, client, body }) => {
     });
   }
 });
-
 // World time API route
 app.options('/api/worldtime', cors(corsOptions));
 app.get('/api/worldtime', async (req, res) => {
@@ -524,11 +513,11 @@ app.get('/api/user', async (req, res) => {
   }
 });
 
-// Start the server
+// Start the server only after the database connects
 const startServer = async () => {
   await connectToDatabase();
   app.listen(PORT, () => {
-    console.log(`Server is listening on port ${PORT}`);
+    console.log(`server is listening to port ${PORT}`);
   });
 };
 
