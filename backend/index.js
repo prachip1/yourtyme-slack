@@ -37,7 +37,7 @@ const connectToDatabase = async () => {
         w: 'majority',
       });
       console.log('db connected');
-      return; // Exit the loop if successful
+      return;
     } catch (err) {
       console.error('MongoDB connection failed:', err);
       retries -= 1;
@@ -46,7 +46,7 @@ const connectToDatabase = async () => {
         process.exit(1);
       }
       console.log(`Retrying connection (${retries} attempts left)...`);
-      await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds before retrying
+      await new Promise(resolve => setTimeout(resolve, 5000));
     }
   }
 };
@@ -58,7 +58,7 @@ app.use(express.urlencoded({ extended: false }));
 
 // CORS setup
 const corsOptions = {
-  origin: ['http://localhost:5173', 'https://yourtyme-slack.vercel.app'],
+  origin: ['http://localhost:517, 'https://yourtyme-slack.vercel.app'],
   credentials: true,
   optionsSuccessStatus: 200,
 };
@@ -94,6 +94,7 @@ slackApp.event('app_home_opened', async ({ event, client }) => {
         ],
       },
     });
+    console.log('App Home published for user:', event.user);
   } catch (error) {
     console.error('App Home error:', error);
   }
@@ -101,54 +102,61 @@ slackApp.event('app_home_opened', async ({ event, client }) => {
 
 // Handle set city button
 slackApp.action('set_city', async ({ body, ack, client }) => {
+  console.log('Received set_city action:', body);
   await ack();
-  await client.views.open({
-    trigger_id: body.trigger_id,
-    view: {
-      type: 'modal',
-      callback_id: 'set_city_modal',
-      title: { type: 'plain_text', text: 'Set Your City' },
-      submit: { type: 'plain_text', text: 'Save' },
-      close: { type: 'plain_text', text: 'Cancel' },
-      blocks: [
-        {
-          type: 'input',
-          block_id: 'city',
-          element: { type: 'plain_text_input', action_id: 'user_city' },
-          label: { type: 'plain_text', text: 'City (e.g., London)' },
-        },
-      ],
-      private_metadata: body.channel_id || '',
-    },
-  });
+  try {
+    await client.views.open({
+      trigger_id: body.trigger_id,
+      view: {
+        type: 'modal',
+        callback_id: 'set_city_modal',
+        title: { type: 'plain_text', text: 'Set Your City' },
+        submit: { type: 'plain_text', text: 'Save' },
+        close: { type: 'plain_text', text: 'Cancel' },
+        blocks: [
+          {
+            type: 'input',
+            block_id: 'city',
+            element: { type: 'plain_text_input', action_id: 'user_city' },
+            label: { type: 'plain_text', text: 'City (e.g., London)' },
+          },
+        ],
+        private_metadata: body.channel_id || '',
+      },
+    });
+    console.log('Set city modal opened for trigger_id:', body.trigger_id);
+  } catch (error) {
+    console.error('Error opening set city modal:', error);
+  }
 });
 
 // Handle city modal submission
-// Handle city modal submission
 slackApp.view('set_city_modal', async ({ view, ack, client, body }) => {
+  console.log('Received set_city_modal submission:', view);
   await ack();
   const city = view.state.values.city.user_city.value;
-  const user_id = view.submitter;
+  const user_id = body.user.id;
   const channel_id = view.private_metadata;
 
   let updatedUser = null;
   let userUpdateSuccess = false;
 
-  // Attempt to update the user's city
+  // Update user's city
   try {
-    const user = await axios.post('https://yourtyme-slack-backend.vercel.app/slack/addcity', {
+    const userResponse = await axios.post('https://yourtyme-slack-backend.vercel.app/slack/addcity', {
       user_id,
       city,
       channel_id,
     });
     userUpdateSuccess = true;
     updatedUser = await User.findOne({ slackId: user_id });
+    console.log('User city updated:', updatedUser);
   } catch (error) {
     console.error('Error updating user city:', error);
     updatedUser = { city: 'Not set (update failed)' };
   }
 
-  // Attempt to update the community (if channel_id exists)
+  // Update community
   if (channel_id && userUpdateSuccess) {
     try {
       await Community.updateOne(
@@ -160,12 +168,13 @@ slackApp.view('set_city_modal', async ({ view, ack, client, body }) => {
         },
         { upsert: true }
       );
+      console.log('Community updated for channel:', channel_id);
     } catch (error) {
       console.error('Error updating community:', error);
     }
   }
 
-  // Fetch updated data for the modal
+  // Fetch channel and member data
   const blocks = [
     {
       type: 'header',
@@ -233,9 +242,7 @@ slackApp.view('set_city_modal', async ({ view, ack, client, body }) => {
         hasMembers = true;
 
         blocks.push(
-          {
-            type: 'divider',
-          },
+          { type: 'divider' },
           {
             type: 'header',
             text: { type: 'plain_text', text: `#${channel.name}` },
@@ -293,35 +300,39 @@ slackApp.view('set_city_modal', async ({ view, ack, client, body }) => {
   }
 
   // Update the original modal
-  await client.views.update({
-    view_id: body.view.root_view_id,
-    view: {
-      type: 'modal',
-      callback_id: 'timezone_view',
-      title: { type: 'plain_text', text: 'YourTyme Timezone Tool' },
-      close: { type: 'plain_text', text: 'Close' },
-      blocks,
-    },
-  });
+  try {
+    await client.views.update({
+      view_id: body.view.root_view_id,
+      view: {
+        type: 'modal',
+        callback_id: 'timezone_view',
+        title: { type: 'plain_text', text: 'YourTyme Timezone Tool' },
+        close: { type: 'plain_text', text: 'Close' },
+        blocks,
+      },
+    });
+    console.log('Timezone view updated for view_id:', body.view.root_view_id);
+  } catch (error) {
+    console.error('Error updating timezone view:', error);
+  }
 
-  // Send a confirmation message (since messaging is now enabled)
-  if (userUpdateSuccess) {
+  // Send confirmation message
+  try {
     await client.chat.postMessage({
       channel: user_id,
-      text: `City set to ${city}! The modal has been updated with your new timezone. 🎉`,
+      text: userUpdateSuccess
+        ? `City set to ${city}! The modal has been updated with your new timezone. 🎉`
+        : 'Failed to update your city due to database issues. Please try again later. ⚠️',
     });
-  } else {
-    await client.chat.postMessage({
-      channel: user_id,
-      text: 'Failed to update your city due to database issues. Please try again later. ⚠️',
-    });
+    console.log('Confirmation message sent to user:', user_id);
+  } catch (error) {
+    console.error('Error sending confirmation message:', error);
   }
 });
 
 // Handle /yourtyme slash command to open the modal
 slackApp.command('/yourtyme', async ({ command, ack, client }) => {
   console.log('Received /yourtyme command:', command);
-
   try {
     await ack();
     console.log('Acknowledged /yourtyme command');
@@ -336,83 +347,146 @@ slackApp.command('/yourtyme', async ({ command, ack, client }) => {
     }
 
     console.log('Attempting to open initial modal');
-    let initialView;
-    try {
-      initialView = await client.views.open({
-        trigger_id: command.trigger_id,
-        view: {
-          type: 'modal',
-          callback_id: 'timezone_view',
-          title: { type: 'plain_text', text: 'YourTyme Timezone Tool' },
-          close: { type: 'plain_text', text: 'Close' },
-          blocks: [
-            {
-              type: 'header',
-              text: { type: 'plain_text', text: '🌍 YourTyme Timezone Tool' },
-            },
-            {
-              type: 'section',
-              text: { type: 'mrkdwn', text: 'Loading your timezone data... ⏳' },
-            },
-          ],
-        },
-      });
-      console.log('Initial modal opened successfully:', initialView);
-    } catch (openError) {
-      console.error('Failed to open initial modal:', openError);
-      await client.chat.postMessage({
-        channel: command.user_id,
-        text: 'Error opening initial modal: ' + openError.message,
-      });
-      return;
-    }
-
-    if (!initialView.view || !initialView.view.id) {
-      console.error('No view_id returned from initial modal');
-      await client.chat.postMessage({
-        channel: command.user_id,
-        text: 'Error: Unable to update modal due to missing view_id.',
-      });
-      return;
-    }
-
-    console.log('Proceeding after opening modal');
-    // Wait a moment to simulate data fetching
-    console.log('Simulating data fetching with delay');
-    await new Promise(resolve => setTimeout(resolve, 2000));
-
-    // Update the modal with simple content
-    const blocks = [
-      {
-        type: 'header',
-        text: { type: 'plain_text', text: '🌍 YourTyme Timezone Tool' },
-      },
-      {
-        type: 'section',
-        text: { type: 'mrkdwn', text: 'Test modal update successful!' },
-      },
-    ];
-
-    console.log('Updating modal with blocks:', blocks);
-    const updateResponse = await client.views.update({
-      view_id: initialView.view.id,
+    const initialView = await client.views.open({
+      trigger_id: command.trigger_id,
       view: {
         type: 'modal',
         callback_id: 'timezone_view',
         title: { type: 'plain_text', text: 'YourTyme Timezone Tool' },
+        submit: { type: 'plain_text', text: 'Submit' },
         close: { type: 'plain_text', text: 'Close' },
-        blocks,
+        blocks: [
+          {
+            type: 'input',
+            block_id: 'city_block',
+            element: {
+              type: 'static_select',
+              action_id: 'city_select',
+              options: [
+                { text: { type: 'plain_text', text: 'New York' }, value: 'America/New_York' },
+                { text: { type: 'plain_text', text: 'London' }, value: 'Europe/London' },
+                { text: { type: 'plain_text', text: 'Tokyo' }, value: 'Asia/Tokyo' },
+                { text: { type: 'plain_text', text: 'Sydney' }, value: 'Australia/Sydney' },
+              ],
+            },
+            label: { type: 'plain_text', text: 'Select a city' },
+          },
+          {
+            type: 'input',
+            block_id: 'members_block',
+            element: {
+              type: 'multi_users_select',
+              action_id: 'members_select',
+              placeholder: { type: 'plain_text', text: 'Select team members' },
+            },
+            label: { type: 'plain_text', text: 'Select team members' },
+          },
+        ],
       },
     });
-    console.log('Modal updated:', updateResponse);
+    console.log('Initial modal opened successfully:', initialView);
   } catch (error) {
-    console.error('Error handling /yourtyme command:', error);
+    console.error('Error opening initial modal:', error);
     await client.chat.postMessage({
       channel: command.user_id,
       text: 'Error in /yourtyme command: ' + error.message,
     });
   }
 });
+
+// Handle timezone_view submission
+slackApp.view('timezone_view', async ({ view, ack, client, body }) => {
+  console.log('Received timezone_view submission:', view);
+  await ack();
+
+  const values = view.state.values;
+  const selectedCity = values.city_block.city_select.selected_option?.value || 'Unknown';
+  const selectedMembers = values.members_block.members_select.selected_users || [];
+
+  console.log('Selected city:', selectedCity);
+  console.log('Selected members:', selectedMembers);
+
+  try {
+    // Fetch timezone data
+    let timezoneData = { city: selectedCity, datetime: 'Time unavailable', timezone: selectedCity };
+    try {
+      const cityName = selectedCity.split('/')[1] || selectedCity;
+      const response = await axios.get(`https://api.api-ninjas.com/v1/worldtime?city=${cityName}`, {
+        headers: { 'X-Api-Key': process.env.API_NINJAS_KEY },
+      });
+      timezoneData = response.data;
+      console.log('Timezone data fetched:', timezoneData);
+    } catch (apiError) {
+      console.error('Error fetching timezone data:', apiError);
+    }
+
+    // Build member info
+    const memberBlocks = [];
+    for (const memberId of selectedMembers) {
+      try {
+        const userInfo = await client.users.info({ user: memberId });
+        const displayName = userInfo.user?.real_name || userInfo.user?.name || memberId;
+        const user = await User.findOne({ slackId: memberId });
+        const memberCity = user?.city || 'Not set';
+        memberBlocks.push({
+          type: 'section',
+          text: { type: 'mrkdwn', text: `*${displayName}*: ${memberCity}` },
+        });
+      } catch (error) {
+        console.error(`Error fetching info for member ${memberId}:`, error);
+        memberBlocks.push({
+          type: 'section',
+          text: { type: 'mrkdwn', text: `*${memberId}*: Error fetching data` },
+        });
+      }
+    }
+
+    // Push results modal
+    const resultView = await client.views.push({
+      trigger_id: body.trigger_id,
+      view: {
+        type: 'modal',
+        callback_id: 'timezone_results_view',
+        title: { type: 'plain_text', text: 'Timezone Results' },
+        close: { type: 'plain_text', text: 'Close' },
+        blocks: [
+          {
+            type: 'header',
+            text: { type: 'plain_text', text: '🌍 Timezone Results' },
+          },
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `*City:* ${timezoneData.city}\n*Time:* ${timezoneData.datetime} (${timezoneData.timezone})`,
+            },
+          },
+          {
+            type: 'divider',
+          },
+          {
+            type: 'header',
+            text: { type: 'plain_text', text: 'Selected Members' },
+          },
+          ...(memberBlocks.length > 0 ? memberBlocks : [
+            {
+              type: 'section',
+              text: { type: 'mrkdwn', text: 'No members selected.' },
+            },
+          ]),
+        ],
+      },
+    });
+    console.log('Results modal opened successfully:', resultView);
+  } catch (error) {
+    console.error('Error opening results modal:', error);
+    await client.chat.postMessage({
+      channel: body.user.id,
+      text: 'Error displaying timezone results: ' + error.message,
+    });
+  }
+});
+
 // World time API route
 app.options('/api/worldtime', cors(corsOptions));
 app.get('/api/worldtime', async (req, res) => {
@@ -450,11 +524,11 @@ app.get('/api/user', async (req, res) => {
   }
 });
 
-// Start the server only after the database connects
+// Start the server
 const startServer = async () => {
   await connectToDatabase();
   app.listen(PORT, () => {
-    console.log(`server is listening to port ${PORT}`);
+    console.log(`Server is listening on port ${PORT}`);
   });
 };
 
