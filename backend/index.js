@@ -322,10 +322,10 @@ slackApp.view('set_city_modal', async ({ view, ack, client, body }) => {
 slackApp.command('/yourtyme', async ({ command, ack, client }) => {
   console.log('Received /yourtyme command:', command);
 
-  await ack();
-  console.log('Acknowledged /yourtyme command');
-
   try {
+    await ack();
+    console.log('Acknowledged /yourtyme command');
+
     if (!command.trigger_id) {
       console.error('No trigger_id provided in command');
       await client.chat.postMessage({
@@ -335,7 +335,7 @@ slackApp.command('/yourtyme', async ({ command, ack, client }) => {
       return;
     }
 
-    // Open a "loading" modal immediately
+    console.log('Attempting to open initial modal');
     const initialView = await client.views.open({
       trigger_id: command.trigger_id,
       view: {
@@ -357,7 +357,16 @@ slackApp.command('/yourtyme', async ({ command, ack, client }) => {
     });
     console.log('Initial modal opened:', initialView);
 
-    // Now fetch the data and update the modal
+    if (!initialView.view || !initialView.view.id) {
+      console.error('No view_id returned from initial modal');
+      await client.chat.postMessage({
+        channel: command.user_id,
+        text: 'Error: Unable to update modal due to missing view_id.',
+      });
+      return;
+    }
+
+    // Proceed with data fetching
     const userId = command.user_id;
     console.log('Fetching user data for userId:', userId);
 
@@ -382,6 +391,7 @@ slackApp.command('/yourtyme', async ({ command, ack, client }) => {
       }
     } catch (dbError) {
       console.error('MongoDB query failed:', dbError);
+      user = null;
     }
 
     const blocks = [
@@ -564,7 +574,6 @@ slackApp.command('/yourtyme', async ({ command, ack, client }) => {
       });
     }
 
-    // Update the modal with the fetched data
     console.log('Updating modal with blocks:', blocks);
     const updateResponse = await client.views.update({
       view_id: initialView.view.id,
