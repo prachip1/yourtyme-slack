@@ -79,6 +79,7 @@ app.use('/', authRoutes);
 slackApp.event('app_home_opened', async ({ event, client }) => {
   const startTime = Date.now();
   console.log('Received app_home_opened event for user:', event.user);
+  console.log('MongoDB connection state:', mongoose.connection.readyState);
   try {
     const blocks = [
       {
@@ -95,12 +96,18 @@ slackApp.event('app_home_opened', async ({ event, client }) => {
     ];
 
     // Fetch user's channels
-    const channelsResponse = await client.conversations.list({
-      types: 'public_channel,private_channel',
-      exclude_archived: true,
-      limit: 100,
-    });
-    console.log('Fetched channels:', channelsResponse.channels?.map(c => c.id) || []);
+    let channelsResponse;
+    try {
+      channelsResponse = await client.conversations.list({
+        types: 'public_channel,private_channel',
+        exclude_archived: true,
+        limit: 100,
+      });
+      console.log('Fetched channels:', channelsResponse.channels?.map(c => ({ id: c.id, name: c.name })) || []);
+    } catch (error) {
+      console.error('Error fetching channels:', error);
+      channelsResponse = { channels: [] };
+    }
 
     let hasMembers = false;
     const allMembers = new Set();
@@ -113,7 +120,7 @@ slackApp.event('app_home_opened', async ({ event, client }) => {
             channel: channel.id,
             limit: 100,
           });
-          console.log(`Members in channel ${channel.id}:`, membersResponse.members);
+          console.log(`Members in channel ${channel.id} (${channel.name}):`, membersResponse.members);
           if (membersResponse.members) {
             membersResponse.members.forEach(memberId => allMembers.add(memberId));
           }
@@ -122,7 +129,7 @@ slackApp.event('app_home_opened', async ({ event, client }) => {
         }
       }
 
-      // Include all members (no exclusion of current user)
+      // Include all members
       console.log('All unique members:', Array.from(allMembers));
 
       if (allMembers.size > 0) {
@@ -132,18 +139,34 @@ slackApp.event('app_home_opened', async ({ event, client }) => {
           text: { type: 'plain_text', text: 'Team Members' },
         });
 
+        // In-memory cache for user data (fallback for MongoDB failures)
+        const userCache = new Map();
+
         // Fetch member details in parallel
         const memberPromises = Array.from(allMembers).map(async (memberId) => {
           try {
             // Get Slack user info
             const userInfo = await client.users.info({ user: memberId });
             const displayName = userInfo.user?.real_name || userInfo.user?.name || memberId;
-            console.log(`Fetched user info for ${memberId}:`, { displayName });
+            console.log(`Fetched user info for ${memberId}:`, { slackId: userInfo.user?.id, displayName });
 
-            // Get city from MongoDB
-            const user = await User.findOne({ slackId: memberId });
+            // Get city from cache or MongoDB
+            let user = userCache.get(memberId);
+            if (!user) {
+              for (let attempt = 1; attempt <= 3; attempt++) {
+                try {
+                  user = await User.findOne({ slackId: memberId });
+                  userCache.set(memberId, user);
+                  break;
+                } catch (dbError) {
+                  console.error(`MongoDB query attempt ${attempt} failed for ${memberId}:`, dbError);
+                  if (attempt === 3) user = null;
+                  await new Promise(resolve => setTimeout(resolve, 1000));
+                }
+              }
+            }
             const city = user?.city || 'Not set';
-            console.log(`MongoDB data for ${memberId}:`, { slackId: user?.slackId, city });
+            console.log(`MongoDB/cache data for ${memberId}:`, { slackId: user?.slackId, city });
 
             // Fetch current time if city is set
             let timeText = city;
