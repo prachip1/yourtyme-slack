@@ -319,100 +319,64 @@ slackApp.view('set_city_modal', async ({ view, ack, client, body }) => {
 });
 
 // Handle /yourtyme slash command to open the modal
-
-slackApp.view('timezone_view', async ({ view, ack, client, body }) => {
-  console.log('Received timezone_view submission:', view);
-  await ack();
-
-  const values = view.state.values;
-  const selectedCity = values.city_block.city_select.selected_option?.value || 'Unknown';
-  const selectedMembers = values.members_block.members_select.selected_users || [];
-
-  console.log('Selected city:', selectedCity);
-  console.log('Selected members:', selectedMembers);
-
+slackApp.command('/yourtyme', async ({ command, ack, client }) => {
+  console.log('Received /yourtyme command:', command);
+  const startTime = Date.now();
   try {
-    // Fetch timezone data
-    let timezoneData = { city: selectedCity, datetime: 'Time unavailable', timezone: selectedCity };
-    try {
-      const cityName = selectedCity.split('/')[1] || selectedCity;
-      const response = await axios.get(`https://api.api-ninjas.com/v1/worldtime?city=${cityName}`, {
-        headers: { 'X-Api-Key': process.env.API_NINJAS_KEY },
+    await ack();
+    console.log(`Acknowledged /yourtyme command in ${Date.now() - startTime}ms`);
+
+    if (!command.trigger_id) {
+      console.error('No trigger_id provided in command');
+      await client.chat.postMessage({
+        channel: command.user_id,
+        text: 'Error: Unable to open modal due to missing trigger_id.',
       });
-      timezoneData = response.data;
-      console.log('Timezone data fetched:', timezoneData);
-    } catch (apiError) {
-      console.error('Error fetching timezone data:', apiError);
+      return;
     }
 
-    // Build member info
-    const memberBlocks = [];
-    for (const memberId of selectedMembers) {
-      try {
-        const userInfo = await client.users.info({ user: memberId });
-        const displayName = userInfo.user?.real_name || userInfo.user?.name || memberId;
-        const user = await User.findOne({ slackId: memberId });
-        const memberCity = user?.city || 'Not set';
-        memberBlocks.push({
-          type: 'section',
-          text: { type: 'mrkdwn', text: `*${displayName}*: ${memberCity}` },
-        });
-      } catch (error) {
-        console.error(`Error fetching info for member ${memberId}:`, error);
-        memberBlocks.push({
-          type: 'section',
-          text: { type: 'mrkdwn', text: `*${memberId}*: Error fetching data` },
-        });
-      }
-    }
-
-    // Push results modal
-    console.log('Pushing results modal with trigger_id:', body.trigger_id);
-    const resultView = await client.views.push({
-      trigger_id: body.trigger_id,
+    console.log('Attempting to open initial modal');
+    const initialView = await client.views.open({
+      trigger_id: command.trigger_id,
       view: {
         type: 'modal',
-        callback_id: 'timezone_results_view',
-        title: { type: 'plain_text', text: 'Timezone Results' },
+        callback_id: 'timezone_view',
+        title: { type: 'plain_text', text: 'YourTyme Timezone Tool' },
+        submit: { type: 'plain_text', text: 'Submit' },
         close: { type: 'plain_text', text: 'Close' },
         blocks: [
           {
-            type: 'header',
-            text: { type: 'plain_text', text: '🌍 Timezone Results' },
-          },
-          {
-            type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text: `*City:* ${timezoneData.city}\n*Time:* ${timezoneData.datetime} (${timezoneData.timezone})`,
+            type: 'input',
+            block_id: 'city_block',
+            element: {
+              type: 'plain_text_input',
+              action_id: 'city_input',
+              placeholder: { type: 'plain_text', text: 'Enter a city (e.g., Hyderabad)' },
             },
+            label: { type: 'plain_text', text: 'City' },
           },
           {
-            type: 'divider',
-          },
-          {
-            type: 'header',
-            text: { type: 'plain_text', text: 'Selected Members' },
-          },
-          ...(memberBlocks.length > 0 ? memberBlocks : [
-            {
-              type: 'section',
-              text: { type: 'mrkdwn', text: 'No members selected.' },
+            type: 'input',
+            block_id: 'members_block',
+            element: {
+              type: 'multi_users_select',
+              action_id: 'members_select',
+              placeholder: { type: 'plain_text', text: 'Select team members' },
             },
-          ]),
+            label: { type: 'plain_text', text: 'Select team members' },
+          },
         ],
       },
     });
-    console.log('Results modal opened successfully:', resultView);
+    console.log('Initial modal opened successfully:', initialView);
   } catch (error) {
-    console.error('Error opening results modal:', error);
+    console.error('Error opening initial modal:', error);
     await client.chat.postMessage({
-      channel: body.user.id,
-      text: 'Error displaying timezone results: ' + error.message,
+      channel: command.user_id,
+      text: 'Error in /yourtyme command: ' + error.message,
     });
   }
 });
-
 // Handle timezone_view submission
 slackApp.view('timezone_view', async ({ view, ack, client, body }) => {
   console.log('Received timezone_view submission:', view);
