@@ -100,20 +100,20 @@ slackApp.event('app_home_opened', async ({ event, client }) => {
       exclude_archived: true,
       limit: 100,
     });
-    console.log('Fetched channels:', channelsResponse.channels?.length || 0);
+    console.log('Fetched channels:', channelsResponse.channels?.map(c => c.id) || []);
 
     let hasMembers = false;
+    const allMembers = new Set();
 
     if (channelsResponse.channels && channelsResponse.channels.length > 0) {
       // Collect unique members across all channels
-      const allMembers = new Set();
-
       for (const channel of channelsResponse.channels) {
         try {
           const membersResponse = await client.conversations.members({
             channel: channel.id,
             limit: 100,
           });
+          console.log(`Members in channel ${channel.id}:`, membersResponse.members);
           if (membersResponse.members) {
             membersResponse.members.forEach(memberId => allMembers.add(memberId));
           }
@@ -122,8 +122,8 @@ slackApp.event('app_home_opened', async ({ event, client }) => {
         }
       }
 
-      // Remove the current user to avoid self-display (optional)
-      allMembers.delete(event.user);
+      // Include all members (no exclusion of current user)
+      console.log('All unique members:', Array.from(allMembers));
 
       if (allMembers.size > 0) {
         hasMembers = true;
@@ -132,16 +132,18 @@ slackApp.event('app_home_opened', async ({ event, client }) => {
           text: { type: 'plain_text', text: 'Team Members' },
         });
 
-        // Fetch member details
-        for (const memberId of allMembers) {
+        // Fetch member details in parallel
+        const memberPromises = Array.from(allMembers).map(async (memberId) => {
           try {
             // Get Slack user info
             const userInfo = await client.users.info({ user: memberId });
             const displayName = userInfo.user?.real_name || userInfo.user?.name || memberId;
+            console.log(`Fetched user info for ${memberId}:`, { displayName });
 
             // Get city from MongoDB
             const user = await User.findOne({ slackId: memberId });
             const city = user?.city || 'Not set';
+            console.log(`MongoDB data for ${memberId}:`, { slackId: user?.slackId, city });
 
             // Fetch current time if city is set
             let timeText = city;
@@ -155,41 +157,35 @@ slackApp.event('app_home_opened', async ({ event, client }) => {
                 );
                 const { datetime, timezone } = timeResponse.data;
                 timeText = `${datetime} (${timezone})`;
+                console.log(`Time fetched for ${city}:`, { datetime, timezone });
               } catch (timeError) {
                 console.error(`Error fetching time for ${city}:`, timeError);
                 timeText = `${city}, Time unavailable`;
               }
             }
 
-            // Add card-like block for the member
-            blocks.push(
-              {
-                type: 'section',
-                text: {
-                  type: 'mrkdwn',
-                  text: `*${displayName}*\n*City:* ${city}\n*Time:* ${timeText}`,
-                },
+            return {
+              type: 'section',
+              text: {
+                type: 'mrkdwn',
+                text: `*${displayName}*\n*City:* ${city}\n*Time:* ${timeText}`,
               },
-              {
-                type: 'divider',
-              }
-            );
+            };
           } catch (error) {
             console.error(`Error processing member ${memberId}:`, error);
-            blocks.push(
-              {
-                type: 'section',
-                text: {
-                  type: 'mrkdwn',
-                  text: `*${memberId}*: Error fetching data`,
-                },
+            return {
+              type: 'section',
+              text: {
+                type: 'mrkdwn',
+                text: `*${memberId}*: Error fetching data`,
               },
-              {
-                type: 'divider',
-              }
-            );
+            };
           }
-        }
+        });
+
+        // Wait for all member data and add to blocks
+        const memberBlocks = await Promise.all(memberPromises);
+        blocks.push(...memberBlocks.map(block => [block, { type: 'divider' }]).flat());
       }
     }
 
@@ -199,7 +195,7 @@ slackApp.event('app_home_opened', async ({ event, client }) => {
         type: 'section',
         text: {
           type: 'mrkdwn',
-          text: 'No team members with cities set in your channels. Use `/yourtyme` to set your city and invite others! 😊',
+          text: 'No team members found in your channels. Use `/yourtyme` to set your city and invite others! 😊',
         },
       });
     }
@@ -215,7 +211,6 @@ slackApp.event('app_home_opened', async ({ event, client }) => {
     console.log(`Published Home tab for user ${event.user} in ${Date.now() - startTime}ms`);
   } catch (error) {
     console.error('App Home error:', error);
-    // Fallback view in case of errors
     await client.views.publish({
       user_id: event.user,
       view: {
