@@ -77,7 +77,145 @@ app.use('/', authRoutes);
 
 // App Home tab
 slackApp.event('app_home_opened', async ({ event, client }) => {
+  const startTime = Date.now();
+  console.log('Received app_home_opened event for user:', event.user);
   try {
+    const blocks = [
+      {
+        type: 'header',
+        text: { type: 'plain_text', text: '🌍 YourTyme Timezone Tool' },
+      },
+      {
+        type: 'section',
+        text: { type: 'mrkdwn', text: 'Timezone information for your team members across your channels.' },
+      },
+      {
+        type: 'divider',
+      },
+    ];
+
+    // Fetch user's channels
+    const channelsResponse = await client.conversations.list({
+      types: 'public_channel,private_channel',
+      exclude_archived: true,
+      limit: 100,
+    });
+    console.log('Fetched channels:', channelsResponse.channels?.length || 0);
+
+    let hasMembers = false;
+
+    if (channelsResponse.channels && channelsResponse.channels.length > 0) {
+      // Collect unique members across all channels
+      const allMembers = new Set();
+
+      for (const channel of channelsResponse.channels) {
+        try {
+          const membersResponse = await client.conversations.members({
+            channel: channel.id,
+            limit: 100,
+          });
+          if (membersResponse.members) {
+            membersResponse.members.forEach(memberId => allMembers.add(memberId));
+          }
+        } catch (error) {
+          console.error(`Error fetching members for channel ${channel.id}:`, error);
+        }
+      }
+
+      // Remove the current user to avoid self-display (optional)
+      allMembers.delete(event.user);
+
+      if (allMembers.size > 0) {
+        hasMembers = true;
+        blocks.push({
+          type: 'header',
+          text: { type: 'plain_text', text: 'Team Members' },
+        });
+
+        // Fetch member details
+        for (const memberId of allMembers) {
+          try {
+            // Get Slack user info
+            const userInfo = await client.users.info({ user: memberId });
+            const displayName = userInfo.user?.real_name || userInfo.user?.name || memberId;
+
+            // Get city from MongoDB
+            const user = await User.findOne({ slackId: memberId });
+            const city = user?.city || 'Not set';
+
+            // Fetch current time if city is set
+            let timeText = city;
+            if (city !== 'Not set') {
+              try {
+                const timeResponse = await axios.get(
+                  `https://api.api-ninjas.com/v1/worldtime?city=${encodeURIComponent(city)}`,
+                  {
+                    headers: { 'X-Api-Key': process.env.API_NINJAS_KEY },
+                  }
+                );
+                const { datetime, timezone } = timeResponse.data;
+                timeText = `${datetime} (${timezone})`;
+              } catch (timeError) {
+                console.error(`Error fetching time for ${city}:`, timeError);
+                timeText = `${city}, Time unavailable`;
+              }
+            }
+
+            // Add card-like block for the member
+            blocks.push(
+              {
+                type: 'section',
+                text: {
+                  type: 'mrkdwn',
+                  text: `*${displayName}*\n*City:* ${city}\n*Time:* ${timeText}`,
+                },
+              },
+              {
+                type: 'divider',
+              }
+            );
+          } catch (error) {
+            console.error(`Error processing member ${memberId}:`, error);
+            blocks.push(
+              {
+                type: 'section',
+                text: {
+                  type: 'mrkdwn',
+                  text: `*${memberId}*: Error fetching data`,
+                },
+              },
+              {
+                type: 'divider',
+              }
+            );
+          }
+        }
+      }
+    }
+
+    // Add message if no members or channels
+    if (!hasMembers) {
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: 'No team members with cities set in your channels. Use `/yourtyme` to set your city and invite others! 😊',
+        },
+      });
+    }
+
+    // Publish Home tab view
+    await client.views.publish({
+      user_id: event.user,
+      view: {
+        type: 'home',
+        blocks,
+      },
+    });
+    console.log(`Published Home tab for user ${event.user} in ${Date.now() - startTime}ms`);
+  } catch (error) {
+    console.error('App Home error:', error);
+    // Fallback view in case of errors
     await client.views.publish({
       user_id: event.user,
       view: {
@@ -89,13 +227,14 @@ slackApp.event('app_home_opened', async ({ event, client }) => {
           },
           {
             type: 'section',
-            text: { type: 'mrkdwn', text: 'Use the `/yourtyme` command to view and manage team timezones!' },
+            text: {
+              type: 'mrkdwn',
+              text: 'Error loading team timezones. Please try again later or contact support. ⚠️',
+            },
           },
         ],
       },
     });
-  } catch (error) {
-    console.error('App Home error:', error);
   }
 });
 
