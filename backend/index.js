@@ -26,7 +26,7 @@ const slackApp = new App({
 
 // Database connection
 const connectToDatabase = async () => {
-  let retries = 5;
+  let retries = 10;
   while (retries > 0) {
     try {
       await mongoose.connect(process.env.MONGO_URL, {
@@ -55,10 +55,10 @@ const connectToDatabase = async () => {
       retries -= 1;
       if (retries === 0) {
         console.error('Max retries reached. Could not connect to MongoDB.');
-        throw err; // Let caller handle
+        throw err;
       }
       console.log(`Retrying connection (${retries} attempts left)...`);
-      await new Promise(resolve => setTimeout(resolve, 10000));
+      await new Promise(resolve => setTimeout(resolve, 15000));
     }
   }
 };
@@ -93,23 +93,29 @@ slackApp.event('app_home_opened', async ({ event, client }) => {
   console.log('Received app_home_opened event for user:', event.user);
   console.log('MongoDB connection state:', mongoose.connection.readyState);
   try {
-    // Wait for MongoDB
-    if (mongoose.connection.readyState !== 1) {
+    // Check MongoDB connection
+    let mongoConnected = mongoose.connection.readyState === 1;
+    if (!mongoConnected) {
       console.log('Waiting for MongoDB connection...');
-      await new Promise((resolve, reject) => {
-        const checkState = setInterval(() => {
-          if (mongoose.connection.readyState === 1) {
+      try {
+        await new Promise((resolve, reject) => {
+          const checkState = setInterval(() => {
+            if (mongoose.connection.readyState === 1) {
+              clearInterval(checkState);
+              resolve();
+            }
+          }, 100);
+          setTimeout(() => {
             clearInterval(checkState);
-            resolve();
-          }
-        }, 100);
-        setTimeout(() => {
-          clearInterval(checkState);
-          reject(new Error('MongoDB not connected after 30s'));
-        }, 30000);
-      });
+            reject(new Error('MongoDB not connected after 20s'));
+          }, 20000);
+        });
+        mongoConnected = true;
+        console.log('MongoDB ready, state:', mongoose.connection.readyState);
+      } catch (error) {
+        console.error('MongoDB connection timeout:', error);
+      }
     }
-    console.log('MongoDB ready, state:', mongoose.connection.readyState);
 
     const blocks = [
       {
@@ -125,12 +131,9 @@ slackApp.event('app_home_opened', async ({ event, client }) => {
       },
     ];
 
-    // Cache for API-Ninjas
-    const timeCache = new Map();
-
     // Fetch channels
     let channelsResponse;
-    for (let attempt = 1; attempt <= 3; attempt++) {
+    for (let attempt = 1; attempt <= 5; attempt++) {
       try {
         channelsResponse = await client.conversations.list({
           types: 'public_channel,private_channel',
@@ -141,8 +144,8 @@ slackApp.event('app_home_opened', async ({ event, client }) => {
         break;
       } catch (error) {
         console.error(`Error fetching channels (attempt ${attempt}):`, error);
-        if (attempt === 3) channelsResponse = { channels: [] };
-        await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+        if (attempt === 5) channelsResponse = { channels: [] };
+        await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
       }
     }
 
@@ -151,7 +154,7 @@ slackApp.event('app_home_opened', async ({ event, client }) => {
 
     if (channelsResponse.channels && channelsResponse.channels.length > 0) {
       for (const channel of channelsResponse.channels) {
-        for (let attempt = 1; attempt <= 3; attempt++) {
+        for (let attempt = 1; attempt <= 5; attempt++) {
           try {
             const membersResponse = await client.conversations.members({
               channel: channel.id,
@@ -164,8 +167,8 @@ slackApp.event('app_home_opened', async ({ event, client }) => {
             break;
           } catch (error) {
             console.error(`Error fetching members for channel ${channel.id} (attempt ${attempt}):`, error);
-            if (attempt === 3) break;
-            await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+            if (attempt === 5) break;
+            await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
           }
         }
       }
@@ -189,54 +192,62 @@ slackApp.event('app_home_opened', async ({ event, client }) => {
             break;
           }
 
+          // Skip known deleted users
+          if (memberId === 'U08SE79SR52') {
+            console.log(`Skipping removed user ${memberId}`);
+            continue;
+          }
+
           try {
             let userInfo;
-            for (let attempt = 1; attempt <= 3; attempt++) {
+            for (let attempt = 1; attempt <= 5; attempt++) {
               try {
                 userInfo = await client.users.info({ user: memberId });
+                if (!userInfo.ok || !userInfo.user || userInfo.user.deleted) {
+                  console.log(`Skipping deleted/invalid user ${memberId}`);
+                  continue;
+                }
                 console.log(`Fetched user info for ${memberId}:`, {
-                  slackId: userInfo.user?.id,
-                  displayName: userInfo.user?.real_name || userInfo.user?.name,
+                  slackId: userInfo.user.id,
+                  displayName: userInfo.user.real_name || userInfo.user.name,
                 });
                 break;
               } catch (error) {
                 console.error(`Error fetching user info for ${memberId} (attempt ${attempt}):`, error);
-                if (attempt === 3) {
-                  console.warn(`Skipping member ${memberId} due to repeated errors`);
-                  continue; // Skip to next member
+                if (attempt === 5) {
+                  console.log(`Skipping member ${memberId} due to repeated errors`);
+                  continue;
                 }
-                await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+                await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
               }
             }
-            if (!userInfo || !userInfo.user) {
-              console.warn(`No user info for ${memberId}, skipping`);
-              continue;
-            }
+            if (!userInfo || !userInfo.user) continue;
+
             const displayName = userInfo.user.real_name || userInfo.user.name || memberId;
 
-            let user;
-            for (let attempt = 1; attempt <= 3; attempt++) {
-              try {
-                user = await User.findOne({ slackId: memberId });
-                console.log(`MongoDB data for ${memberId}:`, {
-                  slackId: user?.slackId || null,
-                  city: user?.city || 'Not set',
-                });
-                break;
-              } catch (dbError) {
-                console.error(`MongoDB query attempt ${attempt} failed for ${memberId}:`, dbError);
-                if (attempt === 3) user = null;
-                await new Promise(resolve => setTimeout(resolve, 1000));
+            let city = 'Not set';
+            if (mongoConnected) {
+              for (let attempt = 1; attempt <= 3; attempt++) {
+                try {
+                  const user = await User.findOne({ slackId: memberId });
+                  console.log(`MongoDB data for ${memberId}:`, {
+                    slackId: user?.slackId || null,
+                    city: user?.city || 'Not set',
+                  });
+                  city = user?.city || 'Not set';
+                  break;
+                } catch (dbError) {
+                  console.error(`MongoDB query attempt ${attempt} failed for ${memberId}:`, dbError);
+                  if (attempt === 3) city = 'Database unavailable';
+                }
               }
+            } else {
+              city = 'Database unavailable';
             }
-            const city = user?.city || 'Not set';
 
             let timeText = city;
-            if (city !== 'Not set') {
-              if (timeCache.has(city)) {
-                timeText = timeCache.get(city);
-                console.log(`Time from cache for ${city}:`, timeText);
-              } else {
+            if (city !== 'Not set' && city !== 'Database unavailable') {
+              for (let attempt = 1; attempt <= 3; attempt++) {
                 try {
                   const timeResponse = await axios.get(
                     `https://api.api-ninjas.com/v1/worldtime?city=${encodeURIComponent(city)}`,
@@ -246,11 +257,12 @@ slackApp.event('app_home_opened', async ({ event, client }) => {
                   );
                   const { datetime, timezone } = timeResponse.data;
                   timeText = `${datetime} (${timezone})`;
-                  timeCache.set(city, timeText);
                   console.log(`Time fetched for ${city}:`, { datetime, timezone });
+                  break;
                 } catch (timeError) {
-                  console.error(`Error fetching time for ${city}:`, timeError);
-                  timeText = `${city}, Time unavailable`;
+                  console.error(`Error fetching time for ${city} (attempt ${attempt}):`, timeError);
+                  if (attempt === 3) timeText = `${city}, Time unavailable`;
+                  await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
                 }
               }
             }
@@ -286,7 +298,7 @@ slackApp.event('app_home_opened', async ({ event, client }) => {
       });
     }
 
-    for (let attempt = 1; attempt <= 3; attempt++) {
+    for (let attempt = 1; attempt <= 5; attempt++) {
       try {
         await client.views.publish({
           user_id: event.user,
@@ -296,8 +308,8 @@ slackApp.event('app_home_opened', async ({ event, client }) => {
         break;
       } catch (error) {
         console.error(`Error publishing Home tab (attempt ${attempt}):`, error);
-        if (attempt === 3) throw error;
-        await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+        if (attempt === 5) throw error;
+        await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
       }
     }
   } catch (error) {
