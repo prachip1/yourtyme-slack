@@ -30,23 +30,35 @@ const connectToDatabase = async () => {
   while (retries > 0) {
     try {
       await mongoose.connect(process.env.MONGO_URL, {
-        serverSelectionTimeoutMS: 30000,
-        connectTimeoutMS: 30000,
-        socketTimeoutMS: 45000,
+        serverSelectionTimeoutMS: 60000,
+        connectTimeoutMS: 60000,
+        socketTimeoutMS: 90000,
         retryWrites: true,
         w: 'majority',
       });
-      console.log('db connected');
-      return; // Exit the loop if successful
+      await new Promise((resolve, reject) => {
+        const checkState = setInterval(() => {
+          if (mongoose.connection.readyState === 1) {
+            clearInterval(checkState);
+            resolve();
+          }
+        }, 100);
+        setTimeout(() => {
+          clearInterval(checkState);
+          reject(new Error('MongoDB connection not ready after 30s'));
+        }, 30000);
+      });
+      console.log('db connected, state:', mongoose.connection.readyState);
+      return;
     } catch (err) {
       console.error('MongoDB connection failed:', err);
       retries -= 1;
       if (retries === 0) {
         console.error('Max retries reached. Could not connect to MongoDB.');
-        process.exit(1);
+        throw err; // Let caller handle
       }
       console.log(`Retrying connection (${retries} attempts left)...`);
-      await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds before retrying
+      await new Promise(resolve => setTimeout(resolve, 10000));
     }
   }
 };
