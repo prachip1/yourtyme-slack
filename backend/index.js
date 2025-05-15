@@ -125,7 +125,7 @@ slackApp.event('app_home_opened', async ({ event, client }) => {
       },
     ];
 
-    // In-memory cache for API-Ninjas
+    // Cache for API-Ninjas
     const timeCache = new Map();
 
     // Fetch channels
@@ -194,21 +194,34 @@ slackApp.event('app_home_opened', async ({ event, client }) => {
             for (let attempt = 1; attempt <= 3; attempt++) {
               try {
                 userInfo = await client.users.info({ user: memberId });
-                console.log(`Fetched user info for ${memberId}:`, { slackId: userInfo.user?.id, displayName: userInfo.user?.real_name || userInfo.user?.name });
+                console.log(`Fetched user info for ${memberId}:`, {
+                  slackId: userInfo.user?.id,
+                  displayName: userInfo.user?.real_name || userInfo.user?.name,
+                });
                 break;
               } catch (error) {
                 console.error(`Error fetching user info for ${memberId} (attempt ${attempt}):`, error);
-                if (attempt === 3) throw error;
+                if (attempt === 3) {
+                  console.warn(`Skipping member ${memberId} due to repeated errors`);
+                  continue; // Skip to next member
+                }
                 await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
               }
             }
-            const displayName = userInfo.user?.real_name || userInfo.user?.name || memberId;
+            if (!userInfo || !userInfo.user) {
+              console.warn(`No user info for ${memberId}, skipping`);
+              continue;
+            }
+            const displayName = userInfo.user.real_name || userInfo.user.name || memberId;
 
             let user;
             for (let attempt = 1; attempt <= 3; attempt++) {
               try {
                 user = await User.findOne({ slackId: memberId });
-                console.log(`MongoDB data for ${memberId}:`, { slackId: user?.slackId, city: user?.city });
+                console.log(`MongoDB data for ${memberId}:`, {
+                  slackId: user?.slackId || null,
+                  city: user?.city || 'Not set',
+                });
                 break;
               } catch (dbError) {
                 console.error(`MongoDB query attempt ${attempt} failed for ${memberId}:`, dbError);
@@ -289,22 +302,26 @@ slackApp.event('app_home_opened', async ({ event, client }) => {
     }
   } catch (error) {
     console.error('App Home error:', error);
-    await client.views.publish({
-      user_id: event.user,
-      view: {
-        type: 'home',
-        blocks: [
-          {
-            type: 'header',
-            text: { type: 'plain_text', text: '🌍 YourTyme Timezone Tool' },
-          },
-          {
-            type: 'section',
-            text: { type: 'mrkdwn', text: 'Error loading team timezones. Please try again later or contact support. ⚠️' },
-          },
-        ],
-      },
-    });
+    try {
+      await client.views.publish({
+        user_id: event.user,
+        view: {
+          type: 'home',
+          blocks: [
+            {
+              type: 'header',
+              text: { type: 'plain_text', text: '🌍 YourTyme Timezone Tool' },
+            },
+            {
+              type: 'section',
+              text: { type: 'mrkdwn', text: 'Error loading team timezones. Please try again later or contact support. ⚠️' },
+            },
+          ],
+        },
+      });
+    } catch (publishError) {
+      console.error('Failed to publish fallback view:', publishError);
+    }
   }
 });
 
