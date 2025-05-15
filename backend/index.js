@@ -93,6 +93,24 @@ slackApp.event('app_home_opened', async ({ event, client }) => {
   console.log('Received app_home_opened event for user:', event.user);
   console.log('MongoDB connection state:', mongoose.connection.readyState);
   try {
+    // Wait for MongoDB
+    if (mongoose.connection.readyState !== 1) {
+      console.log('Waiting for MongoDB connection...');
+      await new Promise((resolve, reject) => {
+        const checkState = setInterval(() => {
+          if (mongoose.connection.readyState === 1) {
+            clearInterval(checkState);
+            resolve();
+          }
+        }, 100);
+        setTimeout(() => {
+          clearInterval(checkState);
+          reject(new Error('MongoDB not connected after 30s'));
+        }, 30000);
+      });
+    }
+    console.log('MongoDB ready, state:', mongoose.connection.readyState);
+
     const blocks = [
       {
         type: 'header',
@@ -107,41 +125,51 @@ slackApp.event('app_home_opened', async ({ event, client }) => {
       },
     ];
 
-    // Fetch user's channels
+    // In-memory cache for API-Ninjas
+    const timeCache = new Map();
+
+    // Fetch channels
     let channelsResponse;
-    try {
-      channelsResponse = await client.conversations.list({
-        types: 'public_channel,private_channel',
-        exclude_archived: true,
-        limit: 100,
-      });
-      console.log('Fetched channels:', channelsResponse.channels?.map(c => ({ id: c.id, name: c.name })) || []);
-    } catch (error) {
-      console.error('Error fetching channels:', error);
-      channelsResponse = { channels: [] };
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        channelsResponse = await client.conversations.list({
+          types: 'public_channel,private_channel',
+          exclude_archived: true,
+          limit: 100,
+        });
+        console.log('Fetched channels:', channelsResponse.channels?.map(c => ({ id: c.id, name: c.name })) || []);
+        break;
+      } catch (error) {
+        console.error(`Error fetching channels (attempt ${attempt}):`, error);
+        if (attempt === 3) channelsResponse = { channels: [] };
+        await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+      }
     }
 
     let hasMembers = false;
     const allMembers = new Set();
 
     if (channelsResponse.channels && channelsResponse.channels.length > 0) {
-      // Collect unique members across all channels
       for (const channel of channelsResponse.channels) {
-        try {
-          const membersResponse = await client.conversations.members({
-            channel: channel.id,
-            limit: 100,
-          });
-          console.log(`Members in channel ${channel.id} (${channel.name}):`, membersResponse.members);
-          if (membersResponse.members) {
-            membersResponse.members.forEach(memberId => allMembers.add(memberId));
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            const membersResponse = await client.conversations.members({
+              channel: channel.id,
+              limit: 100,
+            });
+            console.log(`Members in channel ${channel.id} (${channel.name}):`, membersResponse.members);
+            if (membersResponse.members) {
+              membersResponse.members.forEach(memberId => allMembers.add(memberId));
+            }
+            break;
+          } catch (error) {
+            console.error(`Error fetching members for channel ${channel.id} (attempt ${attempt}):`, error);
+            if (attempt === 3) break;
+            await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
           }
-        } catch (error) {
-          console.error(`Error fetching members for channel ${channel.id}:`, error);
         }
       }
 
-      // Include all members
       console.log('All unique members:', Array.from(allMembers));
 
       if (allMembers.size > 0) {
@@ -151,99 +179,114 @@ slackApp.event('app_home_opened', async ({ event, client }) => {
           text: { type: 'plain_text', text: 'Team Members' },
         });
 
-        // In-memory cache for user data (fallback for MongoDB failures)
-        const userCache = new Map();
+        for (const memberId of allMembers) {
+          if (Date.now() - startTime > 25000) {
+            console.warn('Approaching Vercel timeout, stopping member processing');
+            blocks.push({
+              type: 'section',
+              text: { type: 'mrkdwn', text: '⚠️ Partial data loaded due to timeout. Please try again.' },
+            });
+            break;
+          }
 
-        // Fetch member details in parallel
-        const memberPromises = Array.from(allMembers).map(async (memberId) => {
           try {
-            // Get Slack user info
-            const userInfo = await client.users.info({ user: memberId });
+            let userInfo;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+              try {
+                userInfo = await client.users.info({ user: memberId });
+                console.log(`Fetched user info for ${memberId}:`, { slackId: userInfo.user?.id, displayName: userInfo.user?.real_name || userInfo.user?.name });
+                break;
+              } catch (error) {
+                console.error(`Error fetching user info for ${memberId} (attempt ${attempt}):`, error);
+                if (attempt === 3) throw error;
+                await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+              }
+            }
             const displayName = userInfo.user?.real_name || userInfo.user?.name || memberId;
-            console.log(`Fetched user info for ${memberId}:`, { slackId: userInfo.user?.id, displayName });
 
-            // Get city from cache or MongoDB
-            let user = userCache.get(memberId);
-            if (!user) {
-              for (let attempt = 1; attempt <= 3; attempt++) {
-                try {
-                  user = await User.findOne({ slackId: memberId });
-                  userCache.set(memberId, user);
-                  break;
-                } catch (dbError) {
-                  console.error(`MongoDB query attempt ${attempt} failed for ${memberId}:`, dbError);
-                  if (attempt === 3) user = null;
-                  await new Promise(resolve => setTimeout(resolve, 1000));
-                }
+            let user;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+              try {
+                user = await User.findOne({ slackId: memberId });
+                console.log(`MongoDB data for ${memberId}:`, { slackId: user?.slackId, city: user?.city });
+                break;
+              } catch (dbError) {
+                console.error(`MongoDB query attempt ${attempt} failed for ${memberId}:`, dbError);
+                if (attempt === 3) user = null;
+                await new Promise(resolve => setTimeout(resolve, 1000));
               }
             }
             const city = user?.city || 'Not set';
-            console.log(`MongoDB/cache data for ${memberId}:`, { slackId: user?.slackId, city });
 
-            // Fetch current time if city is set
             let timeText = city;
             if (city !== 'Not set') {
-              try {
-                const timeResponse = await axios.get(
-                  `https://api.api-ninjas.com/v1/worldtime?city=${encodeURIComponent(city)}`,
-                  {
-                    headers: { 'X-Api-Key': process.env.API_NINJAS_KEY },
-                  }
-                );
-                const { datetime, timezone } = timeResponse.data;
-                timeText = `${datetime} (${timezone})`;
-                console.log(`Time fetched for ${city}:`, { datetime, timezone });
-              } catch (timeError) {
-                console.error(`Error fetching time for ${city}:`, timeError);
-                timeText = `${city}, Time unavailable`;
+              if (timeCache.has(city)) {
+                timeText = timeCache.get(city);
+                console.log(`Time from cache for ${city}:`, timeText);
+              } else {
+                try {
+                  const timeResponse = await axios.get(
+                    `https://api.api-ninjas.com/v1/worldtime?city=${encodeURIComponent(city)}`,
+                    {
+                      headers: { 'X-Api-Key': process.env.API_NINJAS_KEY },
+                    }
+                  );
+                  const { datetime, timezone } = timeResponse.data;
+                  timeText = `${datetime} (${timezone})`;
+                  timeCache.set(city, timeText);
+                  console.log(`Time fetched for ${city}:`, { datetime, timezone });
+                } catch (timeError) {
+                  console.error(`Error fetching time for ${city}:`, timeError);
+                  timeText = `${city}, Time unavailable`;
+                }
               }
             }
 
-            return {
-              type: 'section',
-              text: {
-                type: 'mrkdwn',
-                text: `*${displayName}*\n*City:* ${city}\n*Time:* ${timeText}`,
+            blocks.push(
+              {
+                type: 'section',
+                text: {
+                  type: 'mrkdwn',
+                  text: `*${displayName}*\n*City:* ${city}\n*Time:* ${timeText}`,
+                },
               },
-            };
+              { type: 'divider' }
+            );
           } catch (error) {
             console.error(`Error processing member ${memberId}:`, error);
-            return {
-              type: 'section',
-              text: {
-                type: 'mrkdwn',
-                text: `*${memberId}*: Error fetching data`,
+            blocks.push(
+              {
+                type: 'section',
+                text: { type: 'mrkdwn', text: `*${memberId}*: Error fetching data` },
               },
-            };
+              { type: 'divider' }
+            );
           }
-        });
-
-        // Wait for all member data and add to blocks
-        const memberBlocks = await Promise.all(memberPromises);
-        blocks.push(...memberBlocks.map(block => [block, { type: 'divider' }]).flat());
+        }
       }
     }
 
-    // Add message if no members or channels
     if (!hasMembers) {
       blocks.push({
         type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: 'No team members found in your channels. Use `/yourtyme` to set your city and invite others! 😊',
-        },
+        text: { type: 'mrkdwn', text: 'No team members found in your channels. Use `/yourtyme` to set your city and invite others! 😊' },
       });
     }
 
-    // Publish Home tab view
-    await client.views.publish({
-      user_id: event.user,
-      view: {
-        type: 'home',
-        blocks,
-      },
-    });
-    console.log(`Published Home tab for user ${event.user} in ${Date.now() - startTime}ms`);
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await client.views.publish({
+          user_id: event.user,
+          view: { type: 'home', blocks },
+        });
+        console.log(`Published Home tab for user ${event.user} in ${Date.now() - startTime}ms`);
+        break;
+      } catch (error) {
+        console.error(`Error publishing Home tab (attempt ${attempt}):`, error);
+        if (attempt === 3) throw error;
+        await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+      }
+    }
   } catch (error) {
     console.error('App Home error:', error);
     await client.views.publish({
@@ -257,10 +300,7 @@ slackApp.event('app_home_opened', async ({ event, client }) => {
           },
           {
             type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text: 'Error loading team timezones. Please try again later or contact support. ⚠️',
-            },
+            text: { type: 'mrkdwn', text: 'Error loading team timezones. Please try again later or contact support. ⚠️' },
           },
         ],
       },
