@@ -1,13 +1,24 @@
 const { App } = require('@slack/bolt');
 const admin = require('firebase-admin');
 const axios = require('axios');
+require('dotenv').config(); // Load .env
 
 // Initialize Firebase
-const serviceAccount = JSON.parse(process.env.FIREBASE_CREDENTIALS);
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-});
-const db = admin.firestore();
+let db;
+try {
+  if (!process.env.FIREBASE_CREDENTIALS) {
+    throw new Error('FIREBASE_CREDENTIALS is not set in environment');
+  }
+  const serviceAccount = JSON.parse(process.env.FIREBASE_CREDENTIALS);
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount),
+  });
+  db = admin.firestore();
+  console.log('Firebase initialized successfully');
+} catch (error) {
+  console.error('Firebase initialization failed:', error.message);
+  process.exit(1); // Exit if Firebase fails
+}
 
 // Initialize Slack App
 const slackApp = new App({
@@ -258,6 +269,11 @@ slackApp.event('app_home_opened', async ({ event, client }) => {
 
 // Start Slack App
 (async () => {
-  await slackApp.start(process.env.PORT || 3000);
-  console.log('⚡️ YourTyme app is running!');
+  try {
+    await slackApp.start(process.env.PORT || 3000);
+    console.log('⚡️ YourTyme app is running!');
+  } catch (error) {
+    console.error('Failed to start Slack app:', error);
+    process.exit(1);
+  }
 })();

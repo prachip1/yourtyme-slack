@@ -12,7 +12,15 @@
   ],
   "routes": [
     {
+      "src": "/$",
+      "dest": "server.js"
+    },
+    {
       "src": "/slack/.*",
+      "dest": "server.js"
+    },
+    {
+      "src": "/api/.*",
       "dest": "server.js"
     },
     {
