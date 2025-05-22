@@ -11,7 +11,7 @@ const {
   getMembers,
   deleteAllMembers,
   slackOAuthCallback,
-} = require('../authController'); // Fixed import
+} = require('../authControllers'); // Fixed import
 const authenticateToken = require('../middleware/authenticateToken');
 const slackAuth = require('../middleware/slackAuth');
 
