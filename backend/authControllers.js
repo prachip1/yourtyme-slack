@@ -3,29 +3,67 @@ const axios = require('axios');
 
 const test = (req, res) => res.json({ message: 'Test endpoint working' });
 
+// backend/authController.js (update slackOAuthCallback)
 const slackOAuthCallback = async (req, res) => {
-  const { code } = req.query;
+  const { code, state, error } = req.query;
+  if (error) {
+    console.error(`OAuth error from Slack: ${error}`);
+    return res.status(400).json({ error: `Slack OAuth error: ${error}` });
+  }
   if (!code) {
+    console.error('OAuth: Missing code parameter');
     return res.status(400).json({ error: 'Missing code parameter' });
   }
-  try {
-    const response = await axios.post('https://slack.com/api/oauth.v2.access', {
-      client_id: process.env.SLACK_CLIENT_ID,
-      client_secret: process.env.SLACK_CLIENT_SECRET,
-      code,
-      redirect_uri: 'https://yourtyme-slack-backend.vercel.app/slack/oauth/callback',
-    });
-    if (!response.data.ok) {
-      return res.status(400).json({ error: response.data.error });
+  if (!state) {
+    console.error('OAuth: Missing or empty state parameter');
+    return res.status(400).json({ error: 'Missing state parameter' });
+  }
+  console.log(`OAuth: Received code: ${code.substring(0, 20)}..., state: ${state}`);
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const response = await axios.post(
+        'https://slack.com/api/oauth.v2.access',
+        qs.stringify({
+          client_id: process.env.SLACK_CLIENT_ID,
+          client_secret: process.env.SLACK_CLIENT_SECRET,
+          code,
+          redirect_uri: 'https://yourtyme-slack-backend.vercel.app/slack/oauth/callback',
+        }),
+        {
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          timeout: 10000,
+        }
+      );
+      if (!response.data.ok) {
+        console.error(`OAuth: Slack API error (attempt ${attempt}): ${response.data.error}`, {
+          client_id: process.env.SLACK_CLIENT_ID?.substring(0, 20),
+          redirect_uri: 'https://yourtyme-slack-backend.vercel.app/slack/oauth/callback',
+          state,
+        });
+        return res.status(400).json({ error: response.data.error });
+      }
+      const { authed_user, access_token, bot_user_id } = response.data;
+      const slackId = authed_user.id;
+      await db.collection('users').doc(slackId).set(
+        { slackId, access_token, bot_user_id },
+        { merge: true }
+      );
+      console.log(`OAuth: Successfully stored user in database: ${slackId}`);
+      res.redirect(`https://yourtyme-slack.vercel.app/dashboard?slackId=${slackId}&state=${state}`);
+      return;
+    } catch (error) {
+      console.error(`OAuth: Error exchanging code (attempt ${attempt}): ${error.message}`, {
+        code: code.substring(0, 20),
+        response: error.response?.data,
+        client_id: process.env.SLACK_CLIENT_ID?.substring(0, 20),
+        state,
+      });
+      if (attempt === 3) {
+        res.status(500).json({ error: 'OAuth failed after retries' });
+        return;
+      }
+      await new Promise(resolve => setTimeout(resolve, 1000));
     }
-    const { authed_user } = response.data;
-    const slackId = authed_user.id;
-    await db.collection('users').doc(slackId).set({ slackId }, { merge: true });
-    console.log(`Successfully stored user in database: ${slackId}`);
-    res.redirect(`https://yourtyme-slack.vercel.app/dashboard?slackId=${slackId}`);
-  } catch (error) {
-    console.error('OAuth error:', error.message);
-    res.status(500).json({ error: 'OAuth failed' });
   }
 };
 
