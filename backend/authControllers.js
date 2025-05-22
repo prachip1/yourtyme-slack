@@ -1,239 +1,157 @@
+const { db } = require('./firebase');
 const axios = require('axios');
-const { db, admin } = require('./firebase');
 
-// Test endpoint
-const test = (req, res) => {
-  res.json({ message: 'API is working' });
-};
+const test = (req, res) => res.json({ message: 'Test endpoint working' });
 
-// Get Profile endpoint
-const getProfile = async (req, res) => {
+const slackOAuthCallback = async (req, res) => {
+  const { code } = req.query;
+  if (!code) {
+    return res.status(400).json({ error: 'Missing code parameter' });
+  }
   try {
-    const slackId = req.user.slackId;
-    console.log(`Fetching profile for slackId: ${slackId}`);
-    const userDoc = await db.collection('users').doc(slackId).get();
-    res.json(userDoc.exists ? userDoc.data() : null);
+    const response = await axios.post('https://slack.com/api/oauth.v2.access', {
+      client_id: process.env.SLACK_CLIENT_ID,
+      client_secret: process.env.SLACK_CLIENT_SECRET,
+      code,
+      redirect_uri: 'https://yourtyme-slack-backend.vercel.app/slack/oauth/callback',
+    });
+    if (!response.data.ok) {
+      return res.status(400).json({ error: response.data.error });
+    }
+    const { authed_user } = response.data;
+    const slackId = authed_user.id;
+    await db.collection('users').doc(slackId).set({ slackId }, { merge: true });
+    console.log(`Successfully stored user in database: ${slackId}`);
+    res.redirect(`https://yourtyme-slack.vercel.app/dashboard?slackId=${slackId}`);
   } catch (error) {
-    console.error(`Error in getProfile for slackId ${req.user.slackId}:`, error);
-    res.status(500).json({ error: error.message });
+    console.error('OAuth error:', error.message);
+    res.status(500).json({ error: 'OAuth failed' });
   }
 };
 
-// Update User Name endpoint
-const updateUserName = async (req, res) => {
-  try {
-    const slackId = req.user.slackId;
-    const name = req.body.name;
-    console.log(`Updating name for slackId: ${slackId}, name: ${name}`);
-    await db.collection('users').doc(slackId).set(
-      { name, updatedAt: admin.firestore.FieldValue.serverTimestamp() },
-      { merge: true }
-    );
-    const userDoc = await db.collection('users').doc(slackId).get();
-    res.json(userDoc.exists ? userDoc.data() : null);
-  } catch (error) {
-    console.error(`Error in updateUserName for slackId ${slackId}:`, error);
-    res.status(500).json({ error: error.message });
-  }
-};
-
-// Add City endpoint
 const addCity = async (req, res) => {
-  const { city, user_id, channel_id } = req.body;
+  const { user_id, city, channel_id } = req.body;
+  if (!user_id || !city) {
+    return res.status(400).json({ error: 'Missing user_id or city' });
+  }
   try {
-    console.log(`Adding city for slackId: ${user_id}, city: ${city}, channel_id: ${channel_id}`);
-    await db.collection('users').doc(user_id).set(
-      {
-        slackId: user_id,
-        city,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      { merge: true }
-    );
-    const userDoc = await db.collection('users').doc(user_id).get();
-    if (!userDoc.exists) {
-      throw new Error(`User not found for slackId: ${user_id}`);
-    }
-    const user = userDoc.data();
-    if (channel_id) {
-      await db.collection('communities').doc(channel_id).set(
-        {
-          members: admin.firestore.FieldValue.arrayUnion({
-            slackId: user_id,
-            name: user.name || user_id,
-            city,
-          }),
-        },
-        { merge: true }
-      );
-    }
-    res.json(user);
+    await db.collection('users').doc(user_id).set({ city }, { merge: true });
+    console.log(`Saved city ${city} for user ${user_id}`);
+    res.json({ ok: true, message: `City ${city} saved for user ${user_id}` });
   } catch (error) {
-    console.error(`Error in addCity for slackId ${user_id}:`, error);
-    res.status(500).json({ error: error.message });
+    console.error('Add city error:', error.message);
+    res.status(500).json({ error: 'Failed to save city' });
   }
 };
 
-// Get City endpoint
 const getCity = async (req, res) => {
+  const slackId = req.user.slackId;
   try {
-    const slackId = req.user.slackId;
-    console.log(`Fetching city for slackId: ${slackId}`);
     const userDoc = await db.collection('users').doc(slackId).get();
-    res.json({ city: userDoc.exists ? userDoc.data().city || null : null });
+    if (!userDoc.exists) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    const { city } = userDoc.data();
+    res.json({ city });
   } catch (error) {
-    console.error(`Error in getCity for slackId ${slackId}:`, error);
-    res.status(500).json({ error: error.message });
+    console.error('Get city error:', error.message);
+    res.status(500).json({ error: 'Failed to get city' });
   }
 };
 
-// Get Community by Channel ID endpoint
+const deleteCity = async (req, res) => {
+  const slackId = req.user.slackId;
+  const { city } = req.params;
+  try {
+    const userDoc = await db.collection('users').doc(slackId).get();
+    if (!userDoc.exists || userDoc.data().city !== city) {
+      return res.status(404).json({ error: 'City not found for user' });
+    }
+    await db.collection('users').doc(slackId).update({ city: null });
+    res.json({ ok: true, message: `City ${city} deleted` });
+  } catch (error) {
+    console.error('Delete city error:', error.message);
+    res.status(500).json({ error: 'Failed to delete city' });
+  }
+};
+
 const getCommunityByTitle = async (req, res) => {
   const { channel_id } = req.params;
-  const { channel_name } = req.body;
   try {
-    console.log(`Fetching community for channel_id: ${channel_id}`);
-    const communityDoc = await db.collection('communities').doc(channel_id).get();
-    let community;
-    if (!communityDoc.exists) {
-      community = {
-        channel_id,
-        channel_name: channel_name || 'Unknown',
-        members: [],
-        creator: req.user.slackId,
-      };
-      await db.collection('communities').doc(channel_id).set(community);
-    } else {
-      community = communityDoc.data();
+    const channelDoc = await db.collection('channels').doc(channel_id).get();
+    if (!channelDoc.exists) {
+      return res.status(404).json({ error: 'Channel not found' });
     }
-    res.json(community);
+    res.json(channelDoc.data());
   } catch (error) {
-    console.error(`Error in getCommunityByTitle for channel_id ${channel_id}:`, error);
-    res.status(500).json({ error: error.message });
+    console.error('Get community error:', error.message);
+    res.status(500).json({ error: 'Failed to get community' });
   }
 };
 
-// Delete City endpoint
-const deleteCity = async (req, res) => {
-  try {
-    const slackId = req.user.slackId;
-    console.log(`Deleting city for slackId: ${slackId}`);
-    await db.collection('users').doc(slackId).set(
-      { city: null, updatedAt: admin.firestore.FieldValue.serverTimestamp() },
-      { merge: true }
-    );
-    const userDoc = await db.collection('users').doc(slackId).get();
-    res.json(userDoc.exists ? userDoc.data() : null);
-  } catch (error) {
-    console.error(`Error in deleteCity for slackId ${slackId}:`, error);
-    res.status(500).json({ error: error.message });
-  }
-};
-
-// Get Members endpoint
 const getMembers = async (req, res) => {
   const { channel_id } = req.params;
   try {
-    console.log(`Fetching members for channel_id: ${channel_id}`);
-    const communityDoc = await db.collection('communities').doc(channel_id).get();
-    if (!communityDoc.exists) {
-      return res.status(404).json({ error: 'Community not found' });
-    }
-    res.json({ members: communityDoc.data().members || [] });
+    const membersSnapshot = await db.collection('users').where('channel_id', '==', channel_id).get();
+    const members = membersSnapshot.docs.map(doc => doc.data());
+    res.json(members);
   } catch (error) {
-    console.error(`Error in getMembers for channel_id ${channel_id}:`, error);
-    res.status(500).json({ error: error.message });
+    console.error('Get members error:', error.message);
+    res.status(500).json({ error: 'Failed to get members' });
   }
 };
 
-// Delete All Members endpoint
 const deleteAllMembers = async (req, res) => {
   try {
-    console.log('Deleting all community members');
+    const usersSnapshot = await db.collection('users').get();
     const batch = db.batch();
-    const communities = await db.collection('communities').get();
-    communities.forEach(doc => {
-      batch.update(doc.ref, { members: [] });
-    });
+    usersSnapshot.docs.forEach(doc => batch.delete(doc.ref));
     await batch.commit();
-    res.json({ message: 'All members deleted' });
+    res.json({ ok: true, message: 'All members deleted' });
   } catch (error) {
-    console.error('Error in deleteAllMembers:', error);
-    res.status(500).json({ error: error.message });
+    console.error('Delete all members error:', error.message);
+    res.status(500).json({ error: 'Failed to delete members' });
   }
 };
 
-// Slack OAuth Callback
-const slackOAuthCallback = async (req, res) => {
+const getProfile = async (req, res) => {
+  const slackId = req.user.slackId;
   try {
-    if (!req.query.code) {
-      throw new Error('Missing code parameter in callback');
+    const userDoc = await db.collection('users').doc(slackId).get();
+    if (!userDoc.exists) {
+      return res.status(404).json({ error: 'User not found' });
     }
-    console.log('Received OAuth callback with code:', req.query.code);
-    console.log('Using client_id:', process.env.SLACK_CLIENT_ID);
-    console.log('Using redirect_uri:', 'https://yourtyme-slack-backend.vercel.app/slack/oauth/callback');
-    const response = await axios.post(
-      'https://slack.com/api/oauth.v2.access',
-      {
-        client_id: process.env.SLACK_CLIENT_ID,
-        client_secret: process.env.SLACK_CLIENT_SECRET,
-        code: req.query.code,
-        redirect_uri: 'https://yourtyme-slack-backend.vercel.app/slack/oauth/callback',
-      },
-      {
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      }
-    );
-    if (!response.data.ok) {
-      if (response.data.error === 'invalid_code') {
-        throw new Error('The authorization code is invalid or has expired. Please try again.');
-      }
-      throw new Error(`Slack API error: ${response.data.error}`);
-    }
-    const { access_token, authed_user, team } = response.data;
-    if (!authed_user || !authed_user.id) {
-      throw new Error('authed_user is missing or invalid in Slack API response');
-    }
-    // Fetch user info for real name
-    const userInfoResponse = await axios.get('https://slack.com/api/users.info', {
-      headers: { Authorization: `Bearer ${access_token}` },
-      params: { user: authed_user.id },
-    });
-    if (!userInfoResponse.data.ok) {
-      throw new Error(`Failed to fetch user info: ${userInfoResponse.data.error}`);
-    }
-    const realName = userInfoResponse.data.user?.real_name || userInfoResponse.data.user?.name || authed_user.id;
-    console.log('Saving user to database:', { slackId: authed_user.id, teamId: team.id, name: realName });
-    await db.collection('users').doc(authed_user.id).set(
-      {
-        slackAccessToken: access_token,
-        slackId: authed_user.id,
-        name: realName,
-        teamId: team.id,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      { merge: true }
-    );
-    console.log('Successfully stored user in database:', authed_user.id);
-    res.redirect(`https://yourtyme-slack.vercel.app/dashboard?slackId=${authed_user.id}`);
+    res.json(userDoc.data());
   } catch (error) {
-    console.error('OAuth error:', error.message);
-    if (error.response) {
-      console.error('Slack API response:', error.response.data);
-    }
-    res.status(500).send(`Authentication failed: ${error.message}`);
+    console.error('Get profile error:', error.message);
+    res.status(500).json({ error: 'Failed to get profile' });
+  }
+};
+
+const updateUserName = async (req, res) => {
+  const slackId = req.user.slackId;
+  const { username } = req.body;
+  if (!username) {
+    return res.status(400).json({ error: 'Missing username' });
+  }
+  try {
+    await db.collection('users').doc(slackId).set({ username }, { merge: true });
+    res.json({ ok: true, message: `Username updated to ${username}` });
+  } catch (error) {
+    console.error('Update username error:', error.message);
+    res.status(500).json({ error: 'Failed to update username' });
   }
 };
 
 module.exports = {
   test,
-  getProfile,
-  updateUserName,
+  slackOAuthCallback,
   addCity,
   getCity,
-  getCommunityByTitle,
   deleteCity,
+  getCommunityByTitle,
   getMembers,
   deleteAllMembers,
-  slackOAuthCallback,
+  getProfile,
+  updateUserName,
 };

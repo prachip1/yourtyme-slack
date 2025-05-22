@@ -11,25 +11,25 @@ const {
   getMembers,
   deleteAllMembers,
   slackOAuthCallback,
-} = require('../authControllers');
+} = require('../authController'); // Fixed import
 const authenticateToken = require('../middleware/authenticateToken');
 const slackAuth = require('../middleware/slackAuth');
 
 // Web routes (for debugging and user management)
 router.get('/', test);
-router.get('/profile', authenticateToken, getProfile);
-router.post('/updatename', authenticateToken, updateUserName);
-router.post('/addcity', authenticateToken, addCity);
-router.get('/cities', authenticateToken, getCity);
-router.delete('/deletecity/:city', authenticateToken, deleteCity);
-router.get('/channel/:channel_id', authenticateToken, getCommunityByTitle);
-router.get('/channel/:channel_id/members', authenticateToken, getMembers);
-router.delete('/deletemembers', authenticateToken, deleteAllMembers);
+router.get('/slack/profile', authenticateToken, getProfile);
+router.post('/slack/update', authenticateToken, updateUserName);
+router.post('/slack/addcity', authenticateToken, addCity);
+router.get('/slack/getcity', authenticateToken, getCity);
+router.delete('/slack/deletecity', authenticateToken, deleteCity);
+router.get('/slack/community/:channel_id', authenticateToken, getCommunityByTitle);
+router.get('/slack/community/members/:channel_id', authenticateToken, getMembers);
+router.delete('/slack/deletemembers', authenticateToken, deleteAllMembers);
 
-// Slack routes
+// Slack routes (for Slack API interactions)
 router.post('/slack/addcity', slackAuth, addCity);
-router.get('/slack/channel/:channel_id', slackAuth, getCommunityByTitle);
-router.get('/slack/channel/:channel_id/members', slackAuth, getMembers);
+router.get('/slack/community/:channel_id', slackAuth, getCommunityByTitle);
+router.get('/slack/community/members/:channel_id', slackAuth, getMembers);
 router.get('/slack/oauth/callback', slackOAuthCallback);
 
 module.exports = router;
