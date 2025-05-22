@@ -14,7 +14,7 @@ function Home() {
           style={{ width: '200px' }}
         />
       </a>
-    <a href="https://slack.com/oauth/v2/authorize?client_id=8817785625495.8934898486597&scope=channels:read,users:read,users.profile:read,commands,app_mentions:read,channels:history,chat:write&redirect_uri=https://yourtyme-slack-backend.vercel.app/slack/oauth/callback&state=12345">Trial Add to Slack</a>
+    <a href="https://slack.com/oauth/v2/authorize?client_id=8817785625495.8829972241173&scope=channels:read,users:read,users.profile:read,commands,app_mentions:read,channels:history,chat:write&redirect_uri=https://yourtyme-slack-backend.vercel.app/slack/oauth/callback&state=12345">Trial Add to Slack</a>
     </div>
   );
 }
