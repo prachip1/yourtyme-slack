@@ -1,40 +1,12 @@
-const User = require('../models/User');
-const Community = require('../models/Community');
+const admin = require('firebase-admin');
 const axios = require('axios');
-const mongoose = require('mongoose');
 
-// Wait for MongoDB connection
-const waitForMongoDB = async () => {
-  if (mongoose.connection.readyState !== 1) {
-    console.log('Waiting for MongoDB connection in authController...');
-    await new Promise((resolve, reject) => {
-      const checkState = setInterval(() => {
-        if (mongoose.connection.readyState === 1) {
-          clearInterval(checkState);
-          resolve();
-        }
-      }, 100);
-      setTimeout(() => {
-        clearInterval(checkState);
-        reject(new Error('MongoDB not connected after 30s'));
-      }, 30000);
-    });
-  }
-  console.log('MongoDB ready in authController, state:', mongoose.connection.readyState);
-};
-
-// Retry MongoDB query
-const retryQuery = async (queryFn, maxAttempts = 3, delay = 1000) => {
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      return await queryFn();
-    } catch (error) {
-      console.error(`MongoDB query attempt ${attempt} failed:`, error);
-      if (attempt === maxAttempts) throw error;
-      await new Promise(resolve => setTimeout(resolve, delay));
-    }
-  }
-};
+// Initialize Firebase
+const serviceAccount = JSON.parse(process.env.FIREBASE_CREDENTIALS);
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+const db = admin.firestore();
 
 // Test endpoint
 const test = (req, res) => {
@@ -44,11 +16,10 @@ const test = (req, res) => {
 // Get Profile endpoint
 const getProfile = async (req, res) => {
   try {
-    await waitForMongoDB();
     const slackId = req.user.slackId;
     console.log(`Fetching profile for slackId: ${slackId}`);
-    const user = await retryQuery(() => User.findOne({ slackId }));
-    res.json(user || null);
+    const userDoc = await db.collection('users').doc(slackId).get();
+    res.json(userDoc.exists ? userDoc.data() : null);
   } catch (error) {
     console.error(`Error in getProfile for slackId ${req.user.slackId}:`, error);
     res.status(500).json({ error: error.message });
@@ -58,17 +29,15 @@ const getProfile = async (req, res) => {
 // Update User Name endpoint
 const updateUserName = async (req, res) => {
   try {
-    await waitForMongoDB();
     const slackId = req.user.slackId;
-    console.log(`Updating name for slackId: ${slackId}, name: ${req.body.name}`);
-    const user = await retryQuery(() =>
-      User.findOneAndUpdate(
-        { slackId },
-        { name: req.body.name },
-        { new: true }
-      )
+    const name = req.body.name;
+    console.log(`Updating name for slackId: ${slackId}, name: ${name}`);
+    await db.collection('users').doc(slackId).set(
+      { name, updatedAt: admin.firestore.FieldValue.serverTimestamp() },
+      { merge: true }
     );
-    res.json(user);
+    const userDoc = await db.collection('users').doc(slackId).get();
+    res.json(userDoc.exists ? userDoc.data() : null);
   } catch (error) {
     console.error(`Error in updateUserName for slackId ${slackId}:`, error);
     res.status(500).json({ error: error.message });
@@ -79,29 +48,30 @@ const updateUserName = async (req, res) => {
 const addCity = async (req, res) => {
   const { city, user_id, channel_id } = req.body;
   try {
-    await waitForMongoDB();
     console.log(`Adding city for slackId: ${user_id}, city: ${city}, channel_id: ${channel_id}`);
-    const user = await retryQuery(() =>
-      User.findOneAndUpdate(
-        { slackId: user_id },
-        { city },
-        { new: true }
-      )
+    await db.collection('users').doc(user_id).set(
+      {
+        slackId: user_id,
+        city,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
     );
-    if (!user) {
+    const userDoc = await db.collection('users').doc(user_id).get();
+    if (!userDoc.exists) {
       throw new Error(`User not found for slackId: ${user_id}`);
     }
+    const user = userDoc.data();
     if (channel_id) {
-      await retryQuery(() =>
-        Community.updateOne(
-          { channel_id },
-          {
-            $addToSet: {
-              members: { slackId: user_id, name: user.name || user_id, city },
-            },
-          },
-          { upsert: true }
-        )
+      await db.collection('communities').doc(channel_id).set(
+        {
+          members: admin.firestore.FieldValue.arrayUnion({
+            slackId: user_id,
+            name: user.name || user_id,
+            city,
+          }),
+        },
+        { merge: true }
       );
     }
     res.json(user);
@@ -114,11 +84,10 @@ const addCity = async (req, res) => {
 // Get City endpoint
 const getCity = async (req, res) => {
   try {
-    await waitForMongoDB();
     const slackId = req.user.slackId;
     console.log(`Fetching city for slackId: ${slackId}`);
-    const user = await retryQuery(() => User.findOne({ slackId }));
-    res.json({ city: user?.city || null });
+    const userDoc = await db.collection('users').doc(slackId).get();
+    res.json({ city: userDoc.exists ? userDoc.data().city || null : null });
   } catch (error) {
     console.error(`Error in getCity for slackId ${slackId}:`, error);
     res.status(500).json({ error: error.message });
@@ -130,18 +99,19 @@ const getCommunityByTitle = async (req, res) => {
   const { channel_id } = req.params;
   const { channel_name } = req.body;
   try {
-    await waitForMongoDB();
     console.log(`Fetching community for channel_id: ${channel_id}`);
-    let community = await retryQuery(() => Community.findOne({ channel_id }));
-    if (!community) {
-      community = await retryQuery(() =>
-        Community.create({
-          channel_id,
-          channel_name: channel_name || 'Unknown',
-          members: [],
-          creator: req.user.slackId,
-        })
-      );
+    const communityDoc = await db.collection('communities').doc(channel_id).get();
+    let community;
+    if (!communityDoc.exists) {
+      community = {
+        channel_id,
+        channel_name: channel_name || 'Unknown',
+        members: [],
+        creator: req.user.slackId,
+      };
+      await db.collection('communities').doc(channel_id).set(community);
+    } else {
+      community = communityDoc.data();
     }
     res.json(community);
   } catch (error) {
@@ -153,17 +123,14 @@ const getCommunityByTitle = async (req, res) => {
 // Delete City endpoint
 const deleteCity = async (req, res) => {
   try {
-    await waitForMongoDB();
     const slackId = req.user.slackId;
     console.log(`Deleting city for slackId: ${slackId}`);
-    const user = await retryQuery(() =>
-      User.findOneAndUpdate(
-        { slackId },
-        { city: null },
-        { new: true }
-      )
+    await db.collection('users').doc(slackId).set(
+      { city: null, updatedAt: admin.firestore.FieldValue.serverTimestamp() },
+      { merge: true }
     );
-    res.json(user);
+    const userDoc = await db.collection('users').doc(slackId).get();
+    res.json(userDoc.exists ? userDoc.data() : null);
   } catch (error) {
     console.error(`Error in deleteCity for slackId ${slackId}:`, error);
     res.status(500).json({ error: error.message });
@@ -174,13 +141,12 @@ const deleteCity = async (req, res) => {
 const getMembers = async (req, res) => {
   const { channel_id } = req.params;
   try {
-    await waitForMongoDB();
     console.log(`Fetching members for channel_id: ${channel_id}`);
-    const community = await retryQuery(() => Community.findOne({ channel_id }));
-    if (!community) {
+    const communityDoc = await db.collection('communities').doc(channel_id).get();
+    if (!communityDoc.exists) {
       return res.status(404).json({ error: 'Community not found' });
     }
-    res.json({ members: community.members });
+    res.json({ members: communityDoc.data().members || [] });
   } catch (error) {
     console.error(`Error in getMembers for channel_id ${channel_id}:`, error);
     res.status(500).json({ error: error.message });
@@ -190,9 +156,13 @@ const getMembers = async (req, res) => {
 // Delete All Members endpoint
 const deleteAllMembers = async (req, res) => {
   try {
-    await waitForMongoDB();
     console.log('Deleting all community members');
-    await retryQuery(() => Community.updateMany({}, { $set: { members: [] } }));
+    const batch = db.batch();
+    const communities = await db.collection('communities').get();
+    communities.forEach(doc => {
+      batch.update(doc.ref, { members: [] });
+    });
+    await batch.commit();
     res.json({ message: 'All members deleted' });
   } catch (error) {
     console.error('Error in deleteAllMembers:', error);
@@ -203,7 +173,6 @@ const deleteAllMembers = async (req, res) => {
 // Slack OAuth Callback
 const slackOAuthCallback = async (req, res) => {
   try {
-    await waitForMongoDB();
     if (!req.query.code) {
       throw new Error('Missing code parameter in callback');
     }
@@ -242,12 +211,15 @@ const slackOAuthCallback = async (req, res) => {
     }
     const realName = userInfoResponse.data.user?.real_name || userInfoResponse.data.user?.name || authed_user.id;
     console.log('Saving user to database:', { slackId: authed_user.id, teamId: team.id, name: realName });
-    await retryQuery(() =>
-      User.updateOne(
-        { slackId: authed_user.id },
-        { slackAccessToken: access_token, slackId: authed_user.id, name: realName, teamId: team.id },
-        { upsert: true }
-      )
+    await db.collection('users').doc(authed_user.id).set(
+      {
+        slackAccessToken: access_token,
+        slackId: authed_user.id,
+        name: realName,
+        teamId: team.id,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
     );
     console.log('Successfully stored user in database:', authed_user.id);
     res.redirect(`https://yourtyme-slack.vercel.app/dashboard?slackId=${authed_user.id}`);
